@@ -1,0 +1,73 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+set -eu
+
+GIT_AGENTS_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$GIT_AGENTS_ROOT/bin/lib-git-agents"
+
+usage() {
+    echo "Usage: job-reset <job-id> [-m <message>] [--force]"
+    echo ""
+    echo "Force a claimed, running, pending, or failed job back to pending."
+    echo "Use --force to reset a completed job or remove a non-empty lock directory."
+    exit 1
+}
+
+JOB_ID=""
+MESSAGE=""
+FORCE=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -m)
+            [ "$#" -ge 2 ] || die "-m requires a message"
+            MESSAGE="$2"
+            shift 2
+            ;;
+        --force)
+            FORCE=1
+            shift
+            ;;
+        --help|-h)
+            usage
+            ;;
+        *)
+            if [ -z "$JOB_ID" ]; then
+                JOB_ID="$1"
+            else
+                die "unexpected argument '$1'"
+            fi
+            shift
+            ;;
+    esac
+done
+
+[ -n "$JOB_ID" ] || usage
+
+validate_job_id "$JOB_ID"
+require_jobs_dir
+
+JOB_DIR="$JOBS_DIR/$JOB_ID"
+[ -d "$JOB_DIR" ] || die "job '$JOB_ID' does not exist"
+
+current_status="$(read_status "$JOB_DIR")"
+require_valid_status "$current_status"
+
+if [ "$current_status" = "done" ] && [ "$FORCE" != "1" ]; then
+    die "cannot reset completed job '$JOB_ID' without --force"
+fi
+
+agent_id=""
+if [ -f "$JOB_DIR/agent-id" ]; then
+    agent_id="$(cat "$JOB_DIR/agent-id" 2>/dev/null || true)"
+fi
+
+remove_job_lock "$JOB_ID" "$JOB_DIR" "$FORCE"
+clear_agent_current_job "$agent_id" "$JOB_ID"
+rm -f "$JOB_DIR/agent-id"
+rm -f "$JOB_DIR/engine.pid" "$JOB_DIR/runner.pid"
+
+write_file_atomic "$JOB_DIR/status" "pending"
+append_log "$JOB_DIR" "Reset to pending" "${MESSAGE:-Manual reset from status $current_status.}"
+
+echo "$JOB_ID: $current_status -> pending"

@@ -1,0 +1,278 @@
+.TH GIT-AGENTS 1 "May 2026" "git-agents 0.1.0" "Git Manual"
+.SH NAME
+git-agents \- Git-native coding agent workflow extension
+.SH SYNOPSIS
+.B git agents
+.I command
+.RI [ options ]
+.br
+.B git-agents
+.I command
+.RI [ options ]
+.SH DESCRIPTION
+.B git-agents
+adds an agent workflow command surface to Git repositories.
+Git runs it as an external subcommand: when
+.B git agents
+is invoked, Git looks for an executable named
+.B git-agents
+on
+.BR PATH .
+.PP
+Runtime state is stored under the repo-local GitAgents directory:
+.PP
+.RS
+.B .git-agents/state/
+.RE
+.PP
+This path is added to
+.BR .gitignore
+during init/install. Tracked project configuration is opt-in and lives under
+.BR .git-agents/
+alongside the ignored state directory.
+.PP
+The runtime state is filesystem-backed. Tasks, jobs, transcripts, logs, rules,
+roles, and tool state remain inspectable with ordinary shell tools.
+.SH COMMANDS
+.TP
+.B init
+Initialize repository-local runtime state under
+.BR .git-agents/state .
+This materializes the packaged runtime tools, rules, roles, team file, and web
+UI into ignored runtime state.
+.TP
+.B install
+Alias for
+.BR init .
+.TP
+.B init --tracked-config
+Initialize runtime state and materialize editable tracked configuration under
+.BR .git-agents/ .
+.TP
+.B start
+Start the agent supervisor. The supervisor launches the console runner and the
+configured team runner, then keeps them running.
+Codex job agents default to
+.B GIT_AGENTS_CODEX_SANDBOX=workspace-write
+with the repository and runtime roots passed as writable directories.
+.TP
+.B start --no-console
+Start only the configured team runner.
+.TP
+.B stop
+Stop the supervisor and its managed processes.
+.TP
+.B restart
+Stop and start the supervisor.
+.TP
+.B status
+Show repository state, supervisor status, web UI URL when available, and task
+and job counts.
+.TP
+.B serve
+Run the local web UI in the foreground. This command never starts, stops, or
+supervises agents.
+.TP
+.B log [-f] [agent]
+Print an agent transcript. The default agent is
+.BR console .
+Use
+.B -f
+to follow the transcript.
+.TP
+.B prompt [--quiet] [message]
+Send a message to the running console agent. If no message argument is provided,
+standard input is used.
+By default, this command prints the console transcript for the current turn.
+Use
+.B -q
+or
+.B --quiet
+to send the prompt and leave the response only in the log.
+.TP
+.B rules show
+Print the effective generic agent protocol.
+.TP
+.B rules edit
+Materialize and edit
+.BR .git-agents/AGENTS.md .
+.TP
+.B rules reset --yes
+Reset
+.B .git-agents/AGENTS.md
+from the packaged generic rules template.
+.TP
+.B role list
+List effective roles and whether each role is package-provided or repo-local.
+.TP
+.B role show name
+Print the effective text for a role.
+.TP
+.B role add name [--from template]
+Create a repo-local role.
+.TP
+.B role edit name
+Materialize and edit a repo-local role.
+.TP
+.B role diff [name]
+Compare repo-local roles against their packaged templates.
+.TP
+.B role reset name --yes
+Reset a role from the packaged template.
+.TP
+.B team list
+List configured team agents.
+.TP
+.B team show [agent]
+Show the effective team configuration or one configured agent.
+.TP
+.B team add agent --role role [--engine engine] [--model model]
+Add an agent to
+.BR .git-agents/team.toml .
+Supported engines are
+.BR codex ,
+.BR claude ,
+and
+.BR pi .
+.TP
+.B team remove agent
+Remove an agent from future starts.
+.TP
+.B team set agent [--role role] [--engine engine] [--model model]
+Update one configured agent.
+.TP
+.B team edit
+Materialize and edit the team configuration.
+.TP
+.B tasks list
+List tasks from runtime state.
+.TP
+.B tasks create task spec-file
+Create a task and enqueue its initial planner job.
+.TP
+.B tasks show task
+Show task details.
+.TP
+.B tasks comment task message
+Append a comment to a task.
+.TP
+.B tasks state task open|done [-m message]
+Set task state.
+.TP
+.B tasks result task result-file
+Record a task result and mark the task done.
+.TP
+.B jobs list
+List jobs from runtime state.
+.TP
+.B jobs create job --role role --task task spec-file
+Create a job linked to a task.
+.TP
+.B jobs reset job [-m message] [--force]
+Force a job back to pending and clear its owner.
+.TP
+.B jobs kill job [-m message] [--force]
+Stop the process recorded for a claimed or running job and mark it failed.
+.TP
+.B jobs orphans
+List claimed or running jobs whose owner state is missing.
+.TP
+.B jobs reset-orphans
+Reset orphaned claimed or running jobs back to pending.
+.TP
+.B jobs reap [minutes]
+Reset jobs whose lock directories have been stale longer than the threshold.
+.TP
+.B agents list
+List runtime agent directories and current jobs.
+.TP
+.B agents reset agent [-m message] [--force] [--no-kill]
+Reset one runtime agent, requeue its active jobs, and signal recorded processes
+unless
+.B --no-kill
+is supplied.
+.TP
+.B spec build
+Reserved for the planned spec builder workflow.
+.SH FILES
+.TP
+.B .git-agents/state/
+Repository-local runtime root.
+.TP
+.B .git-agents/state/AGENTS.md
+Runtime copy of the generic agent protocol.
+.TP
+.B .git-agents/state/roles/
+Runtime role definitions used by launched agents.
+.TP
+.B .git-agents/state/tasks/
+Filesystem task state.
+.TP
+.B .git-agents/state/jobs/
+Filesystem job queue state.
+.TP
+.B .git-agents/state/agents/
+Agent transcripts, prompts, and durable per-agent state.
+.TP
+.B .git-agents/AGENTS.md
+Optional tracked override for generic agent rules.
+.TP
+.B .git-agents/roles/
+Optional tracked role overrides.
+.TP
+.B .git-agents/team.toml
+Optional tracked team configuration.
+.SH EXAMPLES
+.nf
+git agents init
+git agents status
+git agents start
+git agents serve
+git agents prompt "summarize current status"
+git agents prompt --quiet "summarize current status"
+git agents log -f
+.fi
+.PP
+Materialize tracked configuration:
+.PP
+.nf
+git agents init --tracked-config
+git agents rules edit
+git agents role edit implementer
+git agents team edit
+.fi
+.PP
+Create a task and inspect the initial planner job:
+.PP
+.nf
+git agents tasks create my-task /tmp/my-task.md
+git agents tasks list
+git agents jobs list
+git agents jobs reset my-task-plan -m "retry"
+git agents jobs kill my-task-plan -m "stop now"
+git agents agents reset planner-1
+.fi
+.PP
+Package-managed tools under
+.B .git-agents/state/bin
+are runtime internals for agents and advanced debugging. Prefer
+.B git agents
+porcelain commands for normal use.
+.SH HELP
+Use
+.B git agents -h
+or
+.B git agents COMMAND -h
+for argparse-generated command help.
+.PP
+When this manpage is installed in a directory visible to
+.BR man (1),
+.B git help agents
+and
+.B git agents --help
+open this manual.
+.SH EXIT STATUS
+Commands return zero on success and nonzero on errors.
+.SH SEE ALSO
+.BR git (1),
+.BR git-rev-parse (1)

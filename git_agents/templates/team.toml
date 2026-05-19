@@ -1,0 +1,22 @@
+# Default git-agents team. Materialize this file with:
+#   git agents team edit
+
+[[agents]]
+name = "planner-1"
+role = "planner"
+engine = "codex"
+
+[[agents]]
+name = "implementer-1"
+role = "implementer"
+engine = "codex"
+
+[[agents]]
+name = "reviewer-1"
+role = "reviewer"
+engine = "codex"
+
+[[agents]]
+name = "committer-1"
+role = "committer"
+engine = "codex"

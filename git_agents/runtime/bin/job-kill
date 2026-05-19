@@ -1,0 +1,177 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+set -eu
+
+GIT_AGENTS_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$GIT_AGENTS_ROOT/bin/lib-git-agents"
+
+usage() {
+    echo "Usage: job-kill <job-id> [-m <message>] [--force]"
+    echo ""
+    echo "Stop the process recorded for a claimed or running job and mark it failed."
+    echo "Use --force to remove a non-empty lock directory."
+    exit 1
+}
+
+is_positive_pid() {
+    value="${1:-}"
+
+    case "$value" in
+        ""|*[!0-9]*)
+            return 1
+            ;;
+    esac
+
+    [ "$value" -gt 0 ]
+}
+
+pid_running() {
+    pid="$1"
+    kill -0 "$pid" 2>/dev/null
+}
+
+terminate_group() {
+    pid="$1"
+
+    is_positive_pid "$pid" || return 1
+    [ "$pid" -ne "$$" ] || return 1
+
+    kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || return 1
+    return 0
+}
+
+terminate_pid() {
+    pid="$1"
+
+    is_positive_pid "$pid" || return 1
+    [ "$pid" -ne "$$" ] || return 1
+
+    kill -TERM "$pid" 2>/dev/null || return 1
+    return 0
+}
+
+force_kill_group() {
+    pid="$1"
+
+    is_positive_pid "$pid" || return 1
+    [ "$pid" -ne "$$" ] || return 1
+
+    kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || return 1
+    return 0
+}
+
+force_kill_pid() {
+    pid="$1"
+
+    is_positive_pid "$pid" || return 1
+    [ "$pid" -ne "$$" ] || return 1
+
+    kill -KILL "$pid" 2>/dev/null || return 1
+    return 0
+}
+
+read_pid_file() {
+    path="$1"
+    if [ -f "$path" ]; then
+        head -n 1 "$path" 2>/dev/null || true
+    fi
+}
+
+JOB_ID=""
+MESSAGE=""
+FORCE=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -m)
+            [ "$#" -ge 2 ] || die "-m requires a message"
+            MESSAGE="$2"
+            shift 2
+            ;;
+        --force)
+            FORCE=1
+            shift
+            ;;
+        --help|-h)
+            usage
+            ;;
+        *)
+            if [ -z "$JOB_ID" ]; then
+                JOB_ID="$1"
+            else
+                die "unexpected argument '$1'"
+            fi
+            shift
+            ;;
+    esac
+done
+
+[ -n "$JOB_ID" ] || usage
+
+validate_job_id "$JOB_ID"
+require_jobs_dir
+
+JOB_DIR="$JOBS_DIR/$JOB_ID"
+[ -d "$JOB_DIR" ] || die "job '$JOB_ID' does not exist"
+
+current_status="$(read_status "$JOB_DIR")"
+case "$current_status" in
+    claimed|running) ;;
+    *) die "cannot kill job '$JOB_ID' from status '$current_status' (expected: claimed or running)" ;;
+esac
+
+agent_id=""
+if [ -f "$JOB_DIR/agent-id" ]; then
+    agent_id="$(cat "$JOB_DIR/agent-id" 2>/dev/null || true)"
+fi
+
+if [ -n "$agent_id" ]; then
+    validate_agent_id "$agent_id"
+fi
+
+agent_dir=""
+if [ -n "$agent_id" ]; then
+    agent_dir="$GIT_AGENTS_ROOT/agents/$agent_id"
+fi
+
+engine_pid="$(read_pid_file "$JOB_DIR/engine.pid")"
+[ -n "$engine_pid" ] || [ -z "$agent_dir" ] || engine_pid="$(read_pid_file "$agent_dir/engine.pid")"
+runner_pid="$(read_pid_file "$JOB_DIR/runner.pid")"
+[ -n "$runner_pid" ] || [ -z "$agent_dir" ] || runner_pid="$(read_pid_file "$agent_dir/runner.pid")"
+
+remove_job_lock "$JOB_ID" "$JOB_DIR" "$FORCE"
+append_log "$JOB_DIR" "Killed" "${MESSAGE:-Manual job kill requested.}"
+write_file_atomic "$JOB_DIR/status" "failed"
+clear_agent_current_job "$agent_id" "$JOB_ID"
+
+signaled=0
+if is_positive_pid "$engine_pid"; then
+    if terminate_group "$engine_pid"; then
+        signaled=1
+    fi
+fi
+
+if is_positive_pid "$runner_pid"; then
+    if terminate_pid "$runner_pid"; then
+        signaled=1
+    fi
+fi
+
+if [ "$signaled" -eq 1 ]; then
+    sleep 1
+    if is_positive_pid "$engine_pid" && pid_running "$engine_pid"; then
+        force_kill_group "$engine_pid" 2>/dev/null || true
+    fi
+    if is_positive_pid "$runner_pid" && pid_running "$runner_pid"; then
+        force_kill_pid "$runner_pid" 2>/dev/null || true
+    fi
+else
+    echo "warning: no recorded live process for job '$JOB_ID'" >&2
+fi
+
+rm -f "$JOB_DIR/engine.pid" "$JOB_DIR/runner.pid"
+if [ -n "$agent_dir" ]; then
+    rm -f "$agent_dir/engine.pid" "$agent_dir/runner.pid"
+fi
+
+echo "$JOB_ID: $current_status -> failed"
