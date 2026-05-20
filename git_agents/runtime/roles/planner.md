@@ -15,14 +15,11 @@ still unknown, which jobs exist, which artifact or branch is authoritative, and
 the next expected decision.
 
 Only the planner may decide that a task is complete. When complete, write a
-result file and record it with:
+result file and record it according to the generic protocol in `AGENTS.md`.
 
-```text
-bin/task-result <task-id> <result-file>
-```
-
-Only the planner may create new tasks. If a planner job is an intake or split
-request, create the task first, then create jobs linked to that new task.
+Only the planner may split queued work into new tasks. If a planner job is an
+intake or split request, follow the task creation protocol in `AGENTS.md` and
+record why the work was split out.
 
 ## Spec Completion Rule
 

@@ -53,9 +53,9 @@ git rev-parse --show-prefix
 git rev-parse --absolute-git-dir
 ```
 
-Runtime state lives in the worktree under `.git-agents/state/` so Codex
-workspace sandboxing can access it without granting access to all Git-private
-paths. The state directory is added to `.gitignore` during init/install.
+Runtime state lives in the worktree under `.git-agents/state/` so local agent
+CLIs can access GitAgents state without writing tracked project files. The
+state directory is added to `.gitignore` during init/install.
 
 ## State Layout
 
@@ -226,7 +226,7 @@ Possible team commands:
 ```sh
 git agents team list
 git agents team show [agent]
-git agents team add <agent> --role <role> [--engine pi|codex|claude] [--model <model>]
+git agents team add <agent> --role <role> [--engine pi] [--model <model>]
 git agents team remove <agent>
 git agents team set <agent> --role <role>
 git agents team set <agent> --engine <engine>
@@ -272,9 +272,17 @@ Start the configured team:
 - support `--no-console` for batch/headless use
 - return nonzero if agents are already running unless `--restart` is supplied
 
-Codex job agents run from the target repository root with `workspace-write` by
-default. The launcher passes both the repository root and GitAgents runtime root
-as writable directories.
+GitAgents is a Pi-based agentic system. Queued planner, implementer, reviewer,
+and committer jobs run through Pi; no other agent runtime is supported. The
+agent harness is extended through Pi settings, packages, skills, and model
+providers.
+
+Research-oriented web access should be configured in Pi, not in the GitAgents
+task protocol. For example, the `pi-web-access` package can add web search,
+URL fetching, code/docs search, GitHub cloning, PDF extraction, and video
+extraction. If only the interactive console should have web access, use a Pi
+configuration for that console with web-search packages enabled and keep
+queued-agent Pi configurations without those packages.
 
 ### `git agents stop`
 

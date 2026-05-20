@@ -52,9 +52,9 @@ Initialize runtime state and materialize editable tracked configuration under
 .B start
 Start the agent supervisor. The supervisor launches the console runner and the
 configured team runner, then keeps them running.
-Codex job agents default to
-.B GIT_AGENTS_CODEX_SANDBOX=workspace-write
-with the repository and runtime roots passed as writable directories.
+GitAgents is a Pi-based agentic system. Packaged queued agents require
+.B pi
+as their runtime.
 .TP
 .B start --no-console
 Start only the configured team runner.
@@ -130,9 +130,6 @@ Show the effective team configuration or one configured agent.
 Add an agent to
 .BR .git-agents/team.toml .
 Supported engines are
-.BR codex ,
-.BR claude ,
-and
 .BR pi .
 .TP
 .B team remove agent

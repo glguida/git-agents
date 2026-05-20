@@ -11,6 +11,12 @@ git agents <command>
 
 Git resolves that to an executable named `git-agents` on `PATH`.
 
+## Prerequisites
+
+- Git and Python 3.10 or newer.
+- A POSIX `sh` for the runtime helper scripts.
+- `pi` for the queued agents and the built-in interactive console.
+
 ## Local Install
 
 From this repository:
@@ -72,10 +78,26 @@ Use this when you want repo-local editable rules, roles, or team config:
 git agents init --tracked-config
 ```
 
-Codex-backed job agents run with `workspace-write` by default and receive both
-the target repository root and the GitAgents runtime root as writable
-directories. Override `GIT_AGENTS_CODEX_SANDBOX` only when testing a different
-Codex sandbox mode.
+## Pi-Based Agents
+
+GitAgents is a Pi-based agentic system. Pi is the only supported agent runtime
+for the packaged planner, implementer, reviewer, committer, and console agents.
+
+For stronger interactive research and solution-finding, configure Pi rather
+than changing the queued team backend. The Pi package `pi-web-access` adds web
+search, URL fetching, code/docs search, GitHub cloning, PDF extraction, and
+video extraction:
+
+```sh
+pi install npm:pi-web-access
+```
+
+Whether web search is available is a Pi configuration choice. If you want only
+the interactive console to search the web, configure web-access only for the Pi
+configuration used by that console, and keep queued coding-agent Pi
+configurations without web-search packages or keys. GitAgents does not grant
+web search as part of the task protocol, and it does not provide a separate
+web-tool permission layer outside the tools exposed by Pi.
 
 ## Current Scope
 

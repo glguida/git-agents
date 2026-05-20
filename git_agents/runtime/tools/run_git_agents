@@ -17,7 +17,7 @@ Run the named GitAgents team. Team file format:
   <name> <role> <agent> [model]
 
 If team-file is omitted, git_agents/default.team is used. Blank lines and #
-comments are ignored. Agent is one of: pi, pi-interactive, codex, claude.
+comments are ignored. Agent is one of: pi or pi-interactive.
 
 Options:
   --verbose   Print each agent's rendered transcript output to this terminal.
@@ -27,9 +27,14 @@ EOF
 agent_flag() {
     case "$1" in
         pi) echo "--pi" ;;
-        codex) echo "--codex" ;;
-        claude) echo "--claude" ;;
-        *) die "invalid agent '$1' in team file; expected pi, pi-interactive, codex, or claude" ;;
+        *) die "invalid agent '$1' in team file; expected pi or pi-interactive" ;;
+    esac
+}
+
+interactive_agent_flag() {
+    case "$1" in
+        pi-interactive) echo "--pi" ;;
+        *) return 1 ;;
     esac
 }
 
@@ -40,11 +45,11 @@ run_agent_once() {
     role="$4"
     name="$5"
 
-    if [ "$agent" = "pi-interactive" ]; then
+    if interactive_flag="$(interactive_agent_flag "$agent")"; then
         if [ -n "$model" ]; then
-            "$SCRIPT_DIR/agent-pi-interactive" $headless_arg -m "$model" "$role" "$name"
+            "$SCRIPT_DIR/agent-pi-interactive" $headless_arg "$interactive_flag" -m "$model" "$role" "$name"
         else
-            "$SCRIPT_DIR/agent-pi-interactive" $headless_arg "$role" "$name"
+            "$SCRIPT_DIR/agent-pi-interactive" $headless_arg "$interactive_flag" "$role" "$name"
         fi
         return
     fi
@@ -125,7 +130,7 @@ while IFS= read -r line || [ -n "$line" ]; do
 
     validate_agent_id "$name"
     validate_role "$role"
-    if [ "$agent" != "pi-interactive" ]; then
+    if ! interactive_agent_flag "$agent" >/dev/null; then
         agent_flag "$agent" >/dev/null
     fi
 

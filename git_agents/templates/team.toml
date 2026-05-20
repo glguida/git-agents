@@ -4,19 +4,19 @@
 [[agents]]
 name = "planner-1"
 role = "planner"
-engine = "codex"
+engine = "pi"
 
 [[agents]]
 name = "implementer-1"
 role = "implementer"
-engine = "codex"
+engine = "pi"
 
 [[agents]]
 name = "reviewer-1"
 role = "reviewer"
-engine = "codex"
+engine = "pi"
 
 [[agents]]
 name = "committer-1"
 role = "committer"
-engine = "codex"
+engine = "pi"

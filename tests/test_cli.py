@@ -16,6 +16,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 AGENT_TOOL = REPO_ROOT / "git_agents" / "runtime" / "tools" / "agent"
+INTERACTIVE_AGENT_TOOL = REPO_ROOT / "git_agents" / "runtime" / "tools" / "agent-pi-interactive"
 
 
 class CliTest(unittest.TestCase):
@@ -134,6 +135,18 @@ class CliTest(unittest.TestCase):
         loader.exec_module(module)
         return module
 
+    def load_interactive_agent_tool(self):
+        loader = importlib.machinery.SourceFileLoader(
+            "git_agents_runtime_interactive_agent_test",
+            str(INTERACTIVE_AGENT_TOOL),
+        )
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        self.assertIsNotNone(spec)
+        assert spec is not None
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+        return module
+
     def test_follow_console_turn_finishes_partial_line_with_newline(self) -> None:
         from git_agents import cli
 
@@ -152,6 +165,64 @@ class CliTest(unittest.TestCase):
             cli.follow_console_turn(console_dir, transcript, 0)
 
         self.assertEqual(output.getvalue(), "agent response without newline\n")
+
+    def test_console_engine_is_not_configurable(self) -> None:
+        from git_agents import cli
+
+        parser = cli.build_parser(include_internal=True)
+
+        self.assertFalse(hasattr(parser.parse_args(["start"]), "console_engine"))
+        self.assertFalse(hasattr(parser.parse_args(["restart"]), "console_engine"))
+        self.assertFalse(
+            hasattr(
+                parser.parse_args(
+                    ["_supervisor", "--repo-root", str(self.repo), "--state-dir", str(self.state_path())]
+                ),
+                "console_engine",
+            )
+        )
+
+    def test_runtime_agent_defaults_to_pi(self) -> None:
+        agent_tool = self.load_agent_tool()
+        interactive_tool = self.load_interactive_agent_tool()
+
+        with mock.patch.object(sys, "argv", ["agent", "planner", "planner-1"]):
+            self.assertEqual(agent_tool.parse_args().engine, "pi")
+        with mock.patch.object(sys, "argv", ["agent-pi-interactive", "--console"]):
+            self.assertEqual(interactive_tool.parse_args().engine, "pi")
+
+    def test_interactive_prompts_name_runtime_root(self) -> None:
+        interactive_tool = self.load_interactive_agent_tool()
+        root = Path("/tmp/repo/.git-agents/state")
+        repo_root = Path("/tmp/repo")
+
+        console_prompt = interactive_tool.build_prompt(
+            "console",
+            True,
+            root,
+            repo_root,
+            role_text="# Console Role",
+        )
+        self.assertIn("Your GitAgents runtime root is: /tmp/repo/.git-agents/state", console_prompt)
+        self.assertIn("Your target repository root is: /tmp/repo", console_prompt)
+        self.assertIn("Read /tmp/repo/.git-agents/state/AGENTS.md", console_prompt)
+        self.assertIn("effective generic GitAgents protocol", console_prompt)
+        self.assertIn("Use the runtime bin tools under /tmp/repo/.git-agents/state/bin", console_prompt)
+        self.assertIn("paths such as agents/, jobs/, tasks/, roles/, and bin/", console_prompt)
+
+        agent_prompt = interactive_tool.build_prompt(
+            "planner-1",
+            False,
+            root,
+            repo_root,
+            "demo-plan",
+        )
+        self.assertIn("Your GitAgents runtime root is: /tmp/repo/.git-agents/state", agent_prompt)
+        self.assertIn("Your target repository root is: /tmp/repo", agent_prompt)
+        self.assertIn("Your assigned job is: demo-plan", agent_prompt)
+        self.assertIn("Read /tmp/repo/.git-agents/state/AGENTS.md", agent_prompt)
+        self.assertIn("effective generic GitAgents protocol", agent_prompt)
+        self.assertIn("Use the runtime bin tools under /tmp/repo/.git-agents/state/bin", agent_prompt)
 
     def test_init_creates_git_private_state_without_tracked_config(self) -> None:
         self.run_agents("init")
@@ -181,6 +252,17 @@ class CliTest(unittest.TestCase):
         self.assertNotIn(".git-agents/state", status)
         self.assertIn(".gitignore", status)
 
+    def test_init_materializes_effective_rules_into_runtime(self) -> None:
+        self.run_agents("init")
+        state_rules = self.state_path() / "AGENTS.md"
+        self.assertIn("Generic Agent Protocol", state_rules.read_text(encoding="utf-8"))
+
+        local_rules = self.repo / ".git-agents" / "AGENTS.md"
+        local_rules.write_text("# Local Rules\n\nRepo-specific protocol.\n", encoding="utf-8")
+        self.run_agents("init")
+
+        self.assertEqual(state_rules.read_text(encoding="utf-8"), local_rules.read_text(encoding="utf-8"))
+
     def test_tracked_config_materializes_rules_roles_and_team(self) -> None:
         self.run_agents("init", "--tracked-config")
 
@@ -205,7 +287,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(migrated.read_text(encoding="utf-8").strip(), "pending")
 
     def test_team_add_materializes_local_team(self) -> None:
-        self.run_agents("team", "add", "tester-1", "--role", "reviewer", "--engine", "codex", "--model", "gpt-5.4")
+        self.run_agents("team", "add", "tester-1", "--role", "reviewer", "--engine", "pi", "--model", "test-model")
 
         team_file = self.repo / ".git-agents" / "team.toml"
         self.assertTrue(team_file.is_file())
@@ -213,54 +295,14 @@ class CliTest(unittest.TestCase):
 
         listing = self.run_agents("team", "list").stdout
         self.assertIn("tester-1", listing)
-        self.assertIn("gpt-5.4", listing)
+        self.assertIn("test-model", listing)
 
-    def test_codex_command_defaults_to_repo_root_with_workspace_write(self) -> None:
-        agent_tool = self.load_agent_tool()
-        old_value = os.environ.pop("GIT_AGENTS_CODEX_SANDBOX", None)
-        try:
-            cmd = agent_tool.build_command(
-                "codex",
-                None,
-                Path("/tmp/state/agents/planner-1"),
-                "prompt text",
-                Path("/tmp/repo"),
-                Path("/tmp/repo/.git-agents/state"),
-            )
-        finally:
-            if old_value is not None:
-                os.environ["GIT_AGENTS_CODEX_SANDBOX"] = old_value
+    def test_team_add_accepts_interactive_engines(self) -> None:
+        self.run_agents("team", "add", "console-reviewer", "--role", "reviewer", "--engine", "pi-interactive")
 
-        self.assertEqual(cmd[:6], ["codex", "exec", "--json", "--sandbox", "workspace-write", "--cd"])
-        self.assertIn("/tmp/repo", cmd)
-        self.assertIn("--add-dir", cmd)
-        self.assertIn("/tmp/repo/.git-agents/state", cmd)
-        self.assertEqual(cmd[-1], "prompt text")
-
-    def test_codex_command_can_use_workspace_write_with_explicit_roots(self) -> None:
-        agent_tool = self.load_agent_tool()
-        old_value = os.environ.get("GIT_AGENTS_CODEX_SANDBOX")
-        os.environ["GIT_AGENTS_CODEX_SANDBOX"] = "workspace-write"
-        try:
-            cmd = agent_tool.build_command(
-                "codex",
-                "gpt-test",
-                Path("/tmp/state/agents/planner-1"),
-                "prompt text",
-                Path("/tmp/repo"),
-                Path("/tmp/repo/.git-agents/state"),
-            )
-        finally:
-            if old_value is None:
-                os.environ.pop("GIT_AGENTS_CODEX_SANDBOX", None)
-            else:
-                os.environ["GIT_AGENTS_CODEX_SANDBOX"] = old_value
-
-        self.assertIn("workspace-write", cmd)
-        self.assertIn("--add-dir", cmd)
-        self.assertIn("/tmp/repo", cmd)
-        self.assertIn("/tmp/repo/.git-agents/state", cmd)
-        self.assertIn("gpt-test", cmd)
+        listing = self.run_agents("team", "list").stdout
+        self.assertIn("console-reviewer", listing)
+        self.assertIn("pi-interactive", listing)
 
     def test_team_list_reads_team_run_pid_state(self) -> None:
         self.run_agents("init")
@@ -341,7 +383,7 @@ class CliTest(unittest.TestCase):
         env["PATH"] = "/usr/bin:/bin"
         proc = self.run_agents_with_env(env, "start", "--no-console", check=False)
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("required command not found: codex", proc.stderr)
+        self.assertIn("required command not found: pi", proc.stderr)
 
 
 if __name__ == "__main__":

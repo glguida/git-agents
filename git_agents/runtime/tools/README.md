@@ -4,9 +4,9 @@
 
 This directory contains local helper tools for an installed GitAgents directory.
 
-The shell launchers require `sh` and whichever agent CLI is selected (`pi`,
-`codex`, or `claude`). `tools/git_agents` and `tools/agent` use Python 3 stdlib
-only.
+The shell launchers require `sh` and `pi`. GitAgents is a Pi-based agentic
+system; `tools/git_agents`, `tools/agent`, and `tools/agent-pi-interactive` use
+Python 3 stdlib only.
 
 ## `git_agents`
 
@@ -51,11 +51,13 @@ Team file format:
 ```text
 # <name> <role> <agent> [model]
 planner-1 planner pi
-implementer-1 implementer codex
-reviewer-1 reviewer claude sonnet
+implementer-1 implementer pi
 ```
 
-Use `pi-interactive` for a Pi agent that keeps the normal GitAgents role and job
+The packaged default team uses `pi` for queued planner, implementer, reviewer,
+and committer agents.
+
+Use `pi-interactive` for an agent that keeps the normal GitAgents role and job
 protocol while accepting live messages from the web interface:
 
 ```text
@@ -80,27 +82,21 @@ From the target project root:
 # Start a Pi planner agent.
 git_agents/tools/agent --pi planner planner-1
 
-# Start a named Codex implementer agent.
-git_agents/tools/agent --codex implementer implementer-1
-
-# Start a Claude reviewer agent with a specific model.
-git_agents/tools/agent --claude -m sonnet reviewer reviewer-1
 ```
 
 Options:
 
-- `--pi`: use Pi. This is the default.
-- `--codex`: use Codex CLI.
-- `--claude`: use Claude Code.
+- `--pi`: use Pi, the only supported backend for packaged teams.
 - `--headless`: do not print the rendered transcript to stdout.
 - `-m <model>`: pass a model name to the selected CLI.
 
 CLI stderr is saved in `error.log`.
 
-Codex agents run from the target repository root with `workspace-write` by
-default. The launcher passes both the repository root and GitAgents runtime root
-as writable directories. Override `GIT_AGENTS_CODEX_SANDBOX` only when testing a
-different Codex sandbox mode.
+For research-heavy interactive use, configure Pi with packages such as
+`pi-web-access` in the Pi configuration used by the interactive console. That
+package adds web search, URL fetching, code/docs search, GitHub cloning, PDF
+extraction, and video extraction. Keep queued-agent Pi configurations without
+web-search packages if only the interactive console should have web access.
 
 The agent name is mandatory. `agent` calls `bin/agent-new`, `bin/job-wait`, and
 `bin/job-claim`; the agent itself starts and completes the job according to
@@ -110,10 +106,12 @@ The agent name is mandatory. `agent` calls `bin/agent-new`, `bin/job-wait`, and
 ## `agent-pi-interactive`
 
 `agent-pi-interactive` is launched by `run_git_agents` for team entries that use
-`pi-interactive`, and by `git_agents` itself for the built-in console assistant.
-It starts `pi --mode rpc`, writes the rendered transcript to
-`agents/<agent-name>/transcript.log`, and listens for web input on the agent's
+one of the interactive agent engines, and by `git_agents` itself for the
+built-in console assistant. It writes the rendered transcript to
+`agents/<agent-name>/transcript.log` and listens for web input on the agent's
 local `input.fifo`.
+
+It uses `pi --mode rpc` for a persistent live session.
 
 Humans normally talk to the built-in console from the `Chat` tab in
 `git_agents/tools/git_agents`. Return sends the message; Shift+Return inserts a

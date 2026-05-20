@@ -36,8 +36,11 @@ STATE_IGNORE_PATTERN = f"/{CONFIG_DIR}/{STATE_DIR_NAME}/"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 4173
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-VALID_ENGINES = {"codex", "claude", "pi"}
-ENGINE_COMMAND = {"codex": "codex", "claude": "claude", "pi": "pi"}
+VALID_ENGINES = {"pi", "pi-interactive"}
+ENGINE_COMMAND = {
+    "pi": "pi",
+    "pi-interactive": "pi",
+}
 STATE_SUBDIRS = ("tasks", "jobs", "agents", "runs", "logs")
 
 
@@ -1133,7 +1136,12 @@ def stop_supervisor(repo: Repo, quiet: bool = False) -> int:
     return 0
 
 
-def start_supervisor(repo: Repo, no_console: bool, restart: bool = False) -> int:
+def start_supervisor(
+    repo: Repo,
+    no_console: bool,
+    restart: bool = False,
+    console_model: str | None = None,
+) -> int:
     validate_required_engines(repo, no_console)
     sync_runtime(repo)
     pid_file = repo.state_dir / "runs" / "supervisor.pid"
@@ -1155,6 +1163,8 @@ def start_supervisor(repo: Repo, no_console: bool, restart: bool = False) -> int
     ]
     if no_console:
         command.append("--no-console")
+    elif console_model:
+        command.extend(["--console-model", console_model])
     with log_path.open("ab") as log:
         proc = subprocess.Popen(
             command,
@@ -1173,7 +1183,12 @@ def start_supervisor(repo: Repo, no_console: bool, restart: bool = False) -> int
 
 def cmd_start(args: argparse.Namespace) -> int:
     repo = discover_repo()
-    return start_supervisor(repo, no_console=args.no_console, restart=args.restart)
+    return start_supervisor(
+        repo,
+        no_console=args.no_console,
+        restart=args.restart,
+        console_model=args.console_model,
+    )
 
 
 def cmd_stop(_args: argparse.Namespace) -> int:
@@ -1185,7 +1200,12 @@ def cmd_restart(args: argparse.Namespace) -> int:
     repo = discover_repo()
     ensure_state(repo)
     stop_supervisor(repo, quiet=True)
-    return start_supervisor(repo, no_console=args.no_console, restart=False)
+    return start_supervisor(
+        repo,
+        no_console=args.no_console,
+        restart=False,
+        console_model=args.console_model,
+    )
 
 
 def cmd_supervisor(args: argparse.Namespace) -> int:
@@ -1203,6 +1223,7 @@ def cmd_supervisor(args: argparse.Namespace) -> int:
                 "repo_root": str(root),
                 "started_at": timestamp(),
                 "no_console": bool(args.no_console),
+                "console_model": args.console_model or "",
                 "runtime_root": str(state_dir),
             },
             indent=2,
@@ -1257,10 +1278,18 @@ def cmd_supervisor(args: argparse.Namespace) -> int:
     print(f"{timestamp()} supervisor started for {root}", flush=True)
     try:
         if not args.no_console:
+            console_command = [
+                str(state_dir / "tools" / "agent-pi-interactive"),
+                "--pi",
+                "--console",
+                "--headless",
+            ]
+            if args.console_model:
+                console_command.extend(["--model", args.console_model])
             children.append(
                 launch(
                     "console",
-                    [str(state_dir / "tools" / "agent-pi-interactive"), "--console", "--headless"],
+                    console_command,
                 )
             )
         else:
@@ -1277,9 +1306,17 @@ def cmd_supervisor(args: argparse.Namespace) -> int:
                 label = "console" if index == 0 and not args.no_console else "team"
                 print(f"{timestamp()} {label} exited rc={rc}; restarting", flush=True)
                 if label == "console":
+                    console_command = [
+                        str(state_dir / "tools" / "agent-pi-interactive"),
+                        "--pi",
+                        "--console",
+                        "--headless",
+                    ]
+                    if args.console_model:
+                        console_command.extend(["--model", args.console_model])
                     children[index] = launch(
                         "console",
-                        [str(state_dir / "tools" / "agent-pi-interactive"), "--console", "--headless"],
+                        console_command,
                     )
                 else:
                     children[index] = launch("team", [str(state_dir / "tools" / "run_git_agents")])
@@ -1495,7 +1532,7 @@ def add_team_parser(subparsers: argparse._SubParsersAction) -> None:
     add = team_sub.add_parser("add", help="add a configured agent")
     add.add_argument("agent")
     add.add_argument("--role", required=True)
-    add.add_argument("--engine", choices=sorted(VALID_ENGINES), default="codex")
+    add.add_argument("--engine", choices=sorted(VALID_ENGINES), default="pi")
     add.add_argument("--model")
     add.set_defaults(func=cmd_team_add)
     remove = team_sub.add_parser("remove", help="remove a configured agent")
@@ -1593,11 +1630,13 @@ def build_parser(include_internal: bool = False) -> argparse.ArgumentParser:
     start = subparsers.add_parser("start", help="start the agent supervisor")
     start.add_argument("--restart", action="store_true")
     start.add_argument("--no-console", action="store_true")
+    start.add_argument("--console-model")
     start.set_defaults(func=cmd_start)
 
     subparsers.add_parser("stop", help="stop the agent supervisor").set_defaults(func=cmd_stop)
     restart = subparsers.add_parser("restart", help="restart the agent supervisor")
     restart.add_argument("--no-console", action="store_true")
+    restart.add_argument("--console-model")
     restart.set_defaults(func=cmd_restart)
     subparsers.add_parser("status", help="show repository agent status").set_defaults(func=cmd_status)
 
@@ -1629,6 +1668,7 @@ def build_parser(include_internal: bool = False) -> argparse.ArgumentParser:
         supervisor.add_argument("--repo-root", required=True)
         supervisor.add_argument("--state-dir", required=True)
         supervisor.add_argument("--no-console", action="store_true")
+        supervisor.add_argument("--console-model")
         supervisor.set_defaults(func=cmd_supervisor)
 
     return parser

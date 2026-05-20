@@ -174,7 +174,6 @@ class Renderer:
     def __init__(self, transcript: Transcript, engine: str) -> None:
         self.t = transcript
         self.engine = engine
-        self.saw_assistant_text = False
 
     def render_line(self, raw: str) -> None:
         raw = raw.rstrip("\n")
@@ -191,11 +190,7 @@ class Renderer:
         if not isinstance(event, dict):
             return
 
-        if self.engine == "claude":
-            self.render_claude(event)
-        elif self.engine == "codex":
-            self.render_codex(event)
-        elif self.engine == "pi":
+        if self.engine == "pi":
             self.render_pi(event)
 
     def text_block(self, title: str, text: str) -> None:
@@ -203,138 +198,6 @@ class Renderer:
             return
         self.t.heading(title)
         self.t.write(text)
-        if title == "Assistant":
-            self.saw_assistant_text = True
-
-    def render_claude(self, event: dict[str, Any]) -> None:
-        typ = event.get("type")
-        subtype = event.get("subtype")
-
-        if typ == "stream_event":
-            inner = event.get("event")
-            if isinstance(inner, dict):
-                delta = inner.get("delta")
-                if isinstance(delta, dict):
-                    delta_type = delta.get("type")
-                    if delta_type == "text_delta":
-                        self.text_block("Assistant", str(delta.get("text", "")))
-                        return
-                    if delta_type in ("thinking_delta", "reasoning_delta"):
-                        self.text_block("Thinking", str(delta.get("thinking") or delta.get("text") or ""))
-                        return
-                inner_type = inner.get("type")
-                if inner_type:
-                    return
-
-        if typ == "system":
-            if subtype == "init":
-                model = event.get("model")
-                session_id = event.get("session_id")
-                detail = "\n".join(str(x) for x in (f"model: {model}" if model else "", f"session: {session_id}" if session_id else "") if x)
-                self.t.event("claude session initialized", detail)
-                return
-            if subtype == "api_retry":
-                attempt = event.get("attempt")
-                max_retries = event.get("max_retries")
-                error = event.get("error")
-                self.t.event("claude api retry", f"attempt: {attempt}/{max_retries}\nerror: {error}")
-                return
-            if subtype:
-                return
-
-        if typ == "assistant":
-            if not self.saw_assistant_text:
-                text = self.extract_claude_message_text(event.get("message"))
-                if text:
-                    self.text_block("Assistant", text)
-                    return
-
-        if typ == "result":
-            result = event.get("result")
-            if result and not self.saw_assistant_text:
-                self.text_block("Assistant", str(result))
-            self.t.event("claude result", self.scalar_metadata(event, skip={"result"}))
-            return
-
-        self.render_generic(event)
-
-    def extract_claude_message_text(self, message: Any) -> str:
-        if not isinstance(message, dict):
-            return ""
-        parts: list[str] = []
-        content = message.get("content")
-        if isinstance(content, list):
-            for item in content:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    parts.append(str(item.get("text", "")))
-        return "".join(parts)
-
-    def render_codex(self, event: dict[str, Any]) -> None:
-        typ = event.get("type")
-        if typ == "thread.started":
-            self.t.event("codex thread started", f"thread: {event.get('thread_id')}")
-            return
-        if typ == "turn.started":
-            self.t.event("codex turn started")
-            return
-        if typ == "turn.completed":
-            usage = event.get("usage")
-            self.t.event("codex turn completed", self.usage_summary(usage))
-            return
-        if typ == "turn.failed":
-            self.t.event("codex turn failed", self.scalar_metadata(event, skip={"type"}))
-            return
-        if typ == "error":
-            self.t.event("codex error", self.scalar_metadata(event, skip={"type"}))
-            return
-
-        if typ in ("item.started", "item.updated", "item.completed"):
-            item = event.get("item")
-            if isinstance(item, dict):
-                self.render_codex_item(typ, item)
-                return
-
-        self.render_generic(event)
-
-    def render_codex_item(self, event_type: str, item: dict[str, Any]) -> None:
-        item_type = str(item.get("type", "item"))
-        status = item.get("status")
-        prefix = event_type.replace("item.", "")
-
-        if item_type == "agent_message":
-            text = item.get("text")
-            if text:
-                self.text_block("Assistant", str(text).rstrip() + "\n")
-                return
-
-        if item_type == "reasoning":
-            text = item.get("text") or item.get("summary") or item.get("content")
-            if text:
-                self.text_block("Reasoning", self.plain_text(text).rstrip() + "\n")
-                return
-
-        if item_type == "command_execution":
-            command = self.command_text(item.get("command"))
-            title = f"command {prefix}"
-            detail_parts = []
-            if command:
-                detail_parts.append(command)
-            if status:
-                detail_parts.append(f"status: {status}")
-            for key in ("exit_code", "duration_ms"):
-                if key in item:
-                    detail_parts.append(f"{key}: {item[key]}")
-            output = item.get("output") or item.get("stdout") or item.get("stderr")
-            if output:
-                detail_parts.append(self.limit_text(self.plain_text(output)))
-            self.t.event(title, "\n".join(detail_parts))
-            return
-
-        if item_type in ("file_change", "patch", "plan_update", "web_search", "mcp_tool_call"):
-            self.t.event(f"{item_type} {prefix}", self.scalar_metadata(item, skip={"id", "type"}))
-            return
-
-        self.t.event(f"{item_type} {prefix}", self.scalar_metadata(item, skip={"id", "type"}))
 
     def render_pi(self, event: dict[str, Any]) -> None:
         typ = event.get("type")
@@ -461,15 +324,6 @@ class Renderer:
             return self.scalar_metadata(value)
         return str(value)
 
-    def usage_summary(self, value: Any) -> str:
-        if not isinstance(value, dict):
-            return ""
-        parts = []
-        for key in ("input_tokens", "output_tokens", "total_tokens", "input", "output", "totalTokens"):
-            if key in value and not isinstance(value[key], (dict, list, tuple)):
-                parts.append(f"{key}: {value[key]}")
-        return "\n".join(parts)
-
     def limit_text(self, text: str, limit: int = 4000) -> str:
         if len(text) <= limit:
             return text
@@ -482,8 +336,6 @@ def parse_args() -> argparse.Namespace:
     )
     engine = parser.add_mutually_exclusive_group()
     engine.add_argument("--pi", action="store_const", const="pi", dest="engine")
-    engine.add_argument("--codex", action="store_const", const="codex", dest="engine")
-    engine.add_argument("--claude", action="store_const", const="claude", dest="engine")
     parser.set_defaults(engine="pi")
     parser.add_argument("--headless", action="store_true", help="Do not mirror rendered transcript output to stdout")
     parser.add_argument("-m", "--model")
@@ -508,41 +360,12 @@ def build_command(
     model: str | None,
     agent_dir: Path,
     prompt: str,
-    repo_root: Path | None = None,
-    runtime_root: Path | None = None,
 ) -> list[str]:
     if engine == "pi":
         cmd = ["pi", "-p", "--mode", "json"]
         if model:
             cmd.extend(["--model", model])
         cmd.extend(["--session-dir", str(agent_dir / "pi-session"), prompt])
-        return cmd
-    if engine == "codex":
-        sandbox = os.environ.get("GIT_AGENTS_CODEX_SANDBOX", "workspace-write")
-        cmd = [
-            "codex",
-            "exec",
-            "--json",
-            "--sandbox",
-            sandbox,
-            "--cd",
-            str(repo_root or runtime_root or Path.cwd()),
-            "--output-last-message",
-            str(agent_dir / "last-message.md"),
-        ]
-        if runtime_root is not None:
-            cmd.extend(["--add-dir", str(runtime_root)])
-        if repo_root is not None:
-            cmd.extend(["--add-dir", str(repo_root)])
-        if model:
-            cmd.extend(["--model", model])
-        cmd.append(prompt)
-        return cmd
-    if engine == "claude":
-        cmd = ["claude", "-p"]
-        if model:
-            cmd.extend(["--model", model])
-        cmd.extend(["--output-format", "stream-json", "--verbose", "--include-partial-messages", prompt])
         return cmd
     raise AssertionError(engine)
 
@@ -594,7 +417,13 @@ def main() -> int:
             f"You are agent {args.agent_name}.",
             f"Your GitAgents runtime root is: {root}",
             f"Your target repository root is: {repo_root}" if repo_root else "",
-            f"Read {root / 'AGENTS.md'} before working. Use the runtime bin tools under {root / 'bin'}.",
+            (
+                f"Read {root / 'AGENTS.md'} before working. It is the effective "
+                "generic GitAgents protocol, copied from repo-local GitAgents "
+                "config when present and from packaged defaults otherwise. "
+                f"Use the runtime bin tools under {root / 'bin'}."
+            ),
+            "Treat paths such as agents/, jobs/, tasks/, roles/, and bin/ in GitAgents instructions as relative to the runtime root.",
         )
         if part
     )
@@ -643,7 +472,7 @@ def main() -> int:
             ),
         )
 
-        cmd = build_command(args.engine, args.model, agent_dir, prompt, repo_root, root)
+        cmd = build_command(args.engine, args.model, agent_dir, prompt)
         proc = subprocess.Popen(
             cmd,
             cwd=repo_root or root,
@@ -679,12 +508,6 @@ def main() -> int:
 
         rc = proc.wait()
         stderr_thread.join(timeout=1)
-
-        last_message = agent_dir / "last-message.md"
-        if args.engine == "codex" and last_message.is_file() and last_message.stat().st_size > 0:
-            text = last_message.read_text(encoding="utf-8", errors="replace")
-            if text and not renderer.saw_assistant_text:
-                transcript.text_block("Assistant", text.rstrip() + "\n")
 
         transcript.event("run end", f"exit: {rc}")
         return rc

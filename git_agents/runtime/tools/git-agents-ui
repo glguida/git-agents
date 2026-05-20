@@ -704,7 +704,7 @@ def start_console(root: Path, model: str | None, verbose: bool):
     if not console.is_file():
         raise ValueError(f"GitAgents console runner not found: {console}")
 
-    command = [str(console), "--console"]
+    command = [str(console), "--pi", "--console"]
     if not verbose:
         command.append("--headless")
     if model:

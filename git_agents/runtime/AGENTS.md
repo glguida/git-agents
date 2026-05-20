@@ -1,6 +1,7 @@
 # GitAgents - Generic Agent Protocol
 
-You are an GitAgents role agent. The launcher starts you with a minimal prompt:
+You are a GitAgents agent. For queued role agents, the launcher starts you with
+a minimal prompt:
 
 ```text
 You are agent <name>.
@@ -12,26 +13,48 @@ Your agent directory is:
 agents/<name>/
 ```
 
-The launcher has already selected your role, claimed one job for that role, and
-recorded that job in your agent directory. Discover your assignment from files,
-not from hidden state.
+For queued role agents, the launcher has already selected your role, claimed one
+job for that role, and recorded that job in your agent directory. Discover your
+assignment from files, not from hidden state. The built-in console is different
+and follows the Console Startup section below.
 
 ## Protocol Authority
 
-This file defines the generic behavior for every GitAgents agent. Role files under
-`roles/` define only role-specific responsibilities. If a role file omits a
-generic rule from this file, the rule still applies.
+This file defines the generic behavior for every GitAgents agent, including the
+built-in console. Role files under `roles/` define only role-specific
+responsibilities. If a role file omits a generic rule from this file, the rule
+still applies.
 
 ## Tool Boundary
 
 GitAgents tools under `bin/` are the interface to local task and job state stored
 under `tasks/` and `jobs/`.
 
+All references to `bin/`, `agents/`, `jobs/`, `tasks/`, and `roles/` are
+relative to the GitAgents runtime root. The launcher tells agents the effective
+runtime `AGENTS.md` path; that file is copied from repo-local GitAgents config
+when present, otherwise from the packaged GitAgents defaults. If an agent runs
+from the target repository root, it must use absolute runtime paths such as
+`<runtime-root>/bin/task-list`, or change directory to the runtime root before
+using relative runtime paths.
+
 Do not bypass the GitAgents tools, edit queue machinery by hand, or debug/repair
 the GitAgents task or job machinery while doing a normal project job. If a tool
 fails, record the exact command and output, create a planner notification job on
 the same task, comment on the task, then fail or release the current job
 according to the problem-handling rules.
+
+## Console Startup
+
+The built-in console is not assigned a queued job. It must read this file and
+`roles/console.md` before inspecting or changing GitAgents state. It does not
+have a current job and must not run `job-done`, `job-fail`, or `job-release` for
+itself.
+
+The console helps the human inspect state, prepare task specs, and dispatch
+tasks when asked. For maintenance actions that change queue state, explain the
+intended action and ask first unless the human already explicitly requested
+that exact action.
 
 ## Startup
 
@@ -87,7 +110,7 @@ or lock files directly.
 The task is the shared history and current state for the work. The job is only
 the current role-scoped unit of execution.
 
-Every agent must:
+Every queued agent must:
 
 - read `bin/task-show <task-id>` before doing job work
 - use the task context to understand where the overall work stands
@@ -97,14 +120,33 @@ Every agent must:
 - create planner notifications on the same task unless a planner explicitly
   creates a new task
 
-Only planner agents may create new tasks. Non-planner agents must not run
-`task-create`. If a non-planner discovers work that should become a separate
-task, it creates a planner notification job on the current task and explains the
-proposed new task.
+Task creation is allowed only in these cases:
 
-When a planner creates a new task, it must create jobs linked to that task with
-`bin/job-create ... -t <new-task-id> ...`. No job may be created without a task
-ID.
+- the console creates a top-level task from a direct human request
+- a planner creates a task from an assigned intake or split request
+
+All other agents must not run `task-create`. If a non-planner queued agent
+discovers work that should become a separate task, it creates a planner
+notification job on the current task and explains the proposed new task.
+
+When an authorized agent creates a task:
+
+1. Write a complete task spec to a real file path. Do not pipe the spec on
+   stdin; `task-create` requires a non-empty spec file.
+2. Choose a stable lowercase task ID using letters, numbers, dots,
+   underscores, or hyphens.
+3. Run `bin/task-create <new-task-id> <spec-file>`.
+4. Treat the created `<new-task-id>-plan` job as the new task's initial planner
+   job. Do not also create a duplicate initial planner job.
+5. If extra starter jobs are truly needed, create them with
+   `bin/job-create ... -t <new-task-id> ...`. No job may be created without a
+   task ID.
+6. If creation happened from an existing task, comment on that task with the
+   new task ID, the initial planner job ID, and why the work was split out.
+
+A task spec should include the objective, scope and non-goals, relevant files,
+commands, or repositories, acceptance criteria, verification expectations, and
+any known base branch, worktree, or integration constraints.
 
 Reading the task does not authorize scope expansion. If the task contains other
 open concerns, use them as context, but do only the assigned job. If broader
@@ -126,7 +168,6 @@ agents/<name>/
   prompt.md
   transcript.log   assistant output or rendered event transcript
   error.log        CLI stderr, warnings, and launch errors
-  last-message.md  final Codex message side channel, when using Codex
 ```
 
 `transcript.log` is appended by the launcher on each run. With `tools/agent`, it
