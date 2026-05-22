@@ -1,7 +1,12 @@
 # git-agents
 
-`git-agents` is a Git extension for running coding-agent workflows inside a
-repository.
+`git-agents` is a Git extension for running repository-local coding-agent
+workflows with versionable, project-specific roles.
+
+It gives each repository a customizable agent team. The packaged planner,
+implementer, reviewer, committer, and console roles work out of the box, while
+tracked repo-local role files let a project adapt those agents to its own
+architecture, test commands, review standards, release process, and risk policy.
 
 The user-facing command is:
 

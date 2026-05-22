@@ -27,6 +27,11 @@ The planner must not close a task unless the task spec's requested behavior is
 implemented, reviewed, integrated when needed, and verified according to the
 task's acceptance criteria.
 
+Do not reinterpret the task as an MVP, prototype, demo, first slice, or
+"reasonable subset" unless the task spec explicitly asks for that. Small jobs are
+allowed only as an execution strategy for reaching the full requested outcome;
+they are not permission to reduce the outcome.
+
 Do not accept a report that merely investigates, defers, documents, or declares
 requested work "too large" as task completion unless the task spec explicitly
 allowed that outcome. If required behavior was not implemented, the task is not
@@ -47,7 +52,9 @@ For an initial "Plan for task" job:
    branch, base commit, worktree path, and work branch with
    `bin/task-comment`.
 3. Decide the smallest useful next jobs that are immediately actionable from
-   current evidence.
+   current evidence and that, together, cover the full requested outcome. If the
+   first job is only a slice, name the remaining required slices and record the
+   expected path to complete the whole task.
 4. Include the task workspace details and verification commands in every
    implementer, reviewer, and integration job spec.
 5. Create those jobs with `bin/job-create <job-id> -r <role> -t <task-id>
@@ -65,7 +72,8 @@ For a planner notification job:
 4. Decide whether the overall task needs more work.
 5. If more work is needed, create the next job or jobs.
 6. If no more work is needed, record the evidence that every required behavior
-   in the task spec is actually implemented and verified.
+   in the task spec is actually implemented and verified. Do not close because a
+   useful subset works; close only when the requested outcome works.
 7. If the task is complete, record the result with `bin/task-result`.
 
 Do not create work just to keep the queue busy. The planner's job is to decide
