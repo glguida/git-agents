@@ -236,7 +236,7 @@ class CliTest(unittest.TestCase):
         self.assertTrue((state / "config.json").is_file())
         self.assertTrue((state / "repo-root").is_file())
         self.assertTrue((state / "bin" / "task-create").is_file())
-        self.assertTrue((state / "tools" / "run_git_agents").is_file())
+        self.assertFalse((state / "tools" / "run_git_agents").exists())
         self.assertTrue((state / "tools" / "git-agents-ui").is_file())
         self.assertTrue((state / "roles" / "planner.md").is_file())
         self.assertIn("/.git-agents/state/", (self.repo / ".gitignore").read_text(encoding="utf-8"))
@@ -262,6 +262,17 @@ class CliTest(unittest.TestCase):
         self.run_agents("init")
 
         self.assertEqual(state_rules.read_text(encoding="utf-8"), local_rules.read_text(encoding="utf-8"))
+
+    def test_init_removes_obsolete_runtime_team_runner_files(self) -> None:
+        state = self.state_path()
+        (state / "tools").mkdir(parents=True)
+        (state / "tools" / "run_git_agents").write_text("obsolete\n", encoding="utf-8")
+        (state / "default.team").write_text("obsolete\n", encoding="utf-8")
+
+        self.run_agents("init")
+
+        self.assertFalse((state / "tools" / "run_git_agents").exists())
+        self.assertFalse((state / "default.team").exists())
 
     def test_tracked_config_materializes_rules_roles_and_team(self) -> None:
         self.run_agents("init", "--tracked-config")
@@ -314,6 +325,33 @@ class CliTest(unittest.TestCase):
         listing = self.run_agents("team", "list").stdout
         self.assertIn("planner-1", listing)
         self.assertIn("running", listing)
+
+    def test_team_agent_command_launches_direct_agent_runner(self) -> None:
+        from git_agents import cli
+
+        state = self.state_path()
+        command = cli.team_agent_command(
+            state,
+            {
+                "name": "reviewer-1",
+                "role": "reviewer",
+                "engine": "pi",
+                "model": "test-model",
+            },
+        )
+        self.assertEqual(command[0], str(state / "tools" / "agent"))
+        self.assertEqual(command[1:], ["--pi", "--headless", "--model", "test-model", "reviewer", "reviewer-1"])
+
+        interactive = cli.team_agent_command(
+            state,
+            {
+                "name": "planner-1",
+                "role": "planner",
+                "engine": "pi-interactive",
+            },
+        )
+        self.assertEqual(interactive[0], str(state / "tools" / "agent-pi-interactive"))
+        self.assertEqual(interactive[1:], ["--pi", "--headless", "planner", "planner-1"])
 
     def test_tasks_and_jobs_list_filesystem_state(self) -> None:
         self.run_agents("init")
@@ -374,6 +412,11 @@ class CliTest(unittest.TestCase):
         status = self.run_agents("status").stdout
         self.assertIn("supervisor", status)
         self.assertIn("running", status)
+        planner_pid = self.state_path() / "agents" / ".team-runs" / "planner-1.pid"
+        deadline = time.time() + 3
+        while not planner_pid.exists() and time.time() < deadline:
+            time.sleep(0.1)
+        self.assertTrue(planner_pid.is_file())
 
         stopped = self.run_agents("stop").stdout
         self.assertIn("stopped git agents supervisor", stopped)

@@ -117,7 +117,9 @@ Implemented now:
 - job and agent recovery commands for reset, kill, orphan reset, and stale lock reap
 - filesystem-backed runtime state
 - package-managed runtime tools materialized under `.git-agents/state` for agents and internals
-- `start` supervises the console runner and configured team runner
+- `start` supervises the console runner and configured team agents directly
 
 See [docs/PLAN.md](docs/PLAN.md) for the full command model, Git integration
-notes, state layout, and packaging plan.
+notes, state layout, and packaging plan. See
+[docs/TEAM_TOML.md](docs/TEAM_TOML.md) for the repo-local team configuration
+format.

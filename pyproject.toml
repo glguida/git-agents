@@ -41,7 +41,6 @@ git_agents = [
   "templates/roles/*.md",
   "templates/team.toml",
   "runtime/AGENTS.md",
-  "runtime/default.team",
   "runtime/bin/*",
   "runtime/roles/*.md",
   "runtime/tools/*",

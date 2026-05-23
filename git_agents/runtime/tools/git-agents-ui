@@ -680,25 +680,6 @@ class ViewerHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def start_team(root: Path, team_file, verbose: bool):
-    runner = root / "tools" / "run_git_agents"
-    if not runner.is_file():
-        raise ValueError(f"GitAgents runner not found: {runner}")
-
-    command = [str(runner)]
-    if verbose:
-        command.append("--verbose")
-    if team_file:
-        command.append(team_file)
-
-    proc = subprocess.Popen(command, cwd=root, start_new_session=True)
-    time.sleep(0.2)
-    rc = proc.poll()
-    if rc is not None:
-        raise RuntimeError(f"GitAgents team exited early with status {rc}")
-    return proc
-
-
 def start_console(root: Path, model: str | None, verbose: bool):
     console = root / "tools" / "agent-pi-interactive"
     if not console.is_file():
@@ -826,11 +807,11 @@ def main():
         type=int,
         help=f"Bind starting port (default: first free port at or above {DEFAULT_PORT})",
     )
-    parser.add_argument("--no-team", action="store_true", help="serve the web interface without starting agents")
+    parser.add_argument("--no-team", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-console", action="store_true", help="do not start the built-in console agent")
     parser.add_argument("--console-model", help="model to pass to the built-in console agent")
-    parser.add_argument("--verbose", action="store_true", help="print agent transcript output in this terminal")
-    parser.add_argument("team_file", nargs="?", help="team file to run; defaults to git_agents/default.team")
+    parser.add_argument("--verbose", action="store_true", help="print console transcript output in this terminal")
+    parser.add_argument("team_file", nargs="?", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     config = Config(root=Path(args.root).expanduser().resolve(), host=args.host, port=args.port)
@@ -847,20 +828,18 @@ def main():
     signal.signal(signal.SIGTERM, request_stop)
 
     try:
-        if not args.no_team:
-            if not args.no_console:
-                console_supervisor = ProcessSupervisor(
-                    "console",
-                    lambda: start_console(config.root, args.console_model, args.verbose),
-                )
-                console_supervisor.start()
-                supervisors.append(console_supervisor)
-            team_supervisor = ProcessSupervisor(
-                "team",
-                lambda: start_team(config.root, args.team_file, args.verbose),
+        if args.team_file:
+            print(
+                "GitAgents web interface no longer starts team files; use 'git agents start'.",
+                file=sys.stderr,
             )
-            team_supervisor.start()
-            supervisors.append(team_supervisor)
+        if not args.no_team and not args.no_console:
+            console_supervisor = ProcessSupervisor(
+                "console",
+                lambda: start_console(config.root, args.console_model, args.verbose),
+            )
+            console_supervisor.start()
+            supervisors.append(console_supervisor)
 
         print(f"GitAgents running at {server_url(server, config)}")
         print(f"Reading GitAgents root: {config.root}")

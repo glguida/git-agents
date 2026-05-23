@@ -4,22 +4,19 @@
 
 This directory contains local helper tools for an installed GitAgents directory.
 
-The shell launchers require `sh` and `pi`. GitAgents is a Pi-based agentic
-system; `tools/git_agents`, `tools/agent`, and `tools/agent-pi-interactive` use
+The helper launchers require `pi`. GitAgents is a Pi-based agentic system;
+`tools/git-agents-ui`, `tools/agent`, and `tools/agent-pi-interactive` use
 Python 3 stdlib only.
 
-## `git_agents`
+## `git-agents-ui`
 
-`git_agents` is the top-level way to run GitAgents. It starts the built-in `console`
-assistant, the configured team, and the local web interface for the installed
-GitAgents directory. It serves the installed root by default, so from the target
-project root:
+`git-agents-ui` serves the local web interface for the installed GitAgents
+runtime directory. The normal user-facing command is:
 
 ```sh
-git_agents/tools/git_agents
+git agents serve
 ```
 
-Then open the printed local URL.
 By default, GitAgents starts at `http://127.0.0.1:4137` and increases the port
 until it finds a free one.
 
@@ -29,44 +26,13 @@ Options:
 - `--host <host>`: bind host. Defaults to `127.0.0.1`.
 - `--port <port>`: starting port to bind. GitAgents tries this port and then
   increasing ports until one is free. Defaults to `4137`.
-- `--verbose`: print agent transcript output in this terminal.
-- `--no-team`: serve the web interface without starting agents.
+- `--verbose`: print console transcript output in this terminal.
 - `--no-console`: do not start the built-in console assistant.
 - `--console-model <model>`: pass a model to the built-in console assistant.
-- `[team-file]`: team file to run. Defaults to `git_agents/default.team`.
 
-## `run_git_agents`
-
-`run_git_agents` starts a named team from a team file and restarts each agent as
-it exits. By default it runs agents headless. Use `--verbose` to print each
-agent's rendered transcript output to the terminal, prefixed by agent name.
-
-```sh
-git_agents/tools/run_git_agents --verbose
-git_agents/tools/run_git_agents
-```
-
-Team file format:
-
-```text
-# <name> <role> <agent> [model]
-planner-1 planner pi
-implementer-1 implementer pi
-```
-
-The packaged default team uses `pi` for queued planner, implementer, reviewer,
-and committer agents.
-
-Use `pi-interactive` for an agent that keeps the normal GitAgents role and job
-protocol while accepting live messages from the web interface:
-
-```text
-planner-1 planner pi-interactive
-```
-
-The built-in `console` assistant is different: `git_agents/tools/git_agents` starts it
-automatically as agent `console` with role `console`. It is not listed in the
-team file and has no queued job.
+The configured queued team is started by `git agents start`, not by the web UI.
+`git agents start` reads the effective `team.toml` and supervises each
+configured agent directly.
 
 ## `agent`
 
@@ -105,16 +71,16 @@ The agent name is mandatory. `agent` calls `bin/agent-new`, `bin/job-wait`, and
 
 ## `agent-pi-interactive`
 
-`agent-pi-interactive` is launched by `run_git_agents` for team entries that use
-one of the interactive agent engines, and by `git_agents` itself for the
-built-in console assistant. It writes the rendered transcript to
+`agent-pi-interactive` is launched by `git agents start` for team entries that
+use one of the interactive agent engines, and for the built-in console
+assistant. It writes the rendered transcript to
 `agents/<agent-name>/transcript.log` and listens for web input on the agent's
 local `input.fifo`.
 
 It uses `pi --mode rpc` for a persistent live session.
 
-Humans normally talk to the built-in console from the `Chat` tab in
-`git_agents/tools/git_agents`. Return sends the message; Shift+Return inserts a
+Humans normally talk to the built-in console from `git agents prompt` or from
+the web UI's `Chat` tab. Return sends the message; Shift+Return inserts a
 newline; `Stop` sends an interrupting steer message. Agent inspectors still
 provide the lower-level transcript view with explicit `Send` and `Steer`
 controls.

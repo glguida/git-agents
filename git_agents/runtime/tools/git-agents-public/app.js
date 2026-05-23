@@ -190,7 +190,7 @@ function renderEmptyChooser() {
   els.metrics.innerHTML = metricSkeleton();
   const message = `
     <div class="empty-note">
-      Run <strong>tools/git_agents</strong> and load the printed local URL.
+      Run <strong>git agents start</strong> to launch agents.
     </div>
   `;
   els.chat.innerHTML = message;

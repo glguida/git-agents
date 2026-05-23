@@ -38,8 +38,8 @@ roles, and tool state remain inspectable with ordinary shell tools.
 .B init
 Initialize repository-local runtime state under
 .BR .git-agents/state .
-This materializes the packaged runtime tools, rules, roles, team file, and web
-UI into ignored runtime state.
+This materializes the packaged runtime tools, rules, roles, and web UI into
+ignored runtime state.
 .TP
 .B install
 Alias for
@@ -50,14 +50,14 @@ Initialize runtime state and materialize editable tracked configuration under
 .BR .git-agents/ .
 .TP
 .B start
-Start the agent supervisor. The supervisor launches the console runner and the
-configured team runner, then keeps them running.
+Start the agent supervisor. The supervisor launches the console runner and each
+configured team agent, then keeps them running.
 GitAgents is a Pi-based agentic system. Packaged queued agents require
 .B pi
 as their runtime.
 .TP
 .B start --no-console
-Start only the configured team runner.
+Start only the configured team agents.
 .TP
 .B stop
 Stop the supervisor and its managed processes.
@@ -130,7 +130,9 @@ Show the effective team configuration or one configured agent.
 Add an agent to
 .BR .git-agents/team.toml .
 Supported engines are
-.BR pi .
+.BR pi
+and
+.BR pi-interactive .
 .TP
 .B team remove agent
 Remove an agent from future starts.

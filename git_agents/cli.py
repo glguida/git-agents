@@ -63,6 +63,14 @@ class Repo:
         return self.root / CONFIG_DIR
 
 
+@dataclass
+class ManagedProcess:
+    label: str
+    command: list[str]
+    proc: subprocess.Popen[bytes]
+    agent_name: str | None = None
+
+
 def timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -195,25 +203,26 @@ def copy_runtime_tree(src_parts: tuple[str, ...], destination: Path) -> None:
         write_bytes_atomic(target, data, executable=executable)
 
 
-def legacy_team_text(agents: list[dict[str, str]]) -> str:
-    lines = [
-        "# git-agents team file",
-        "# Format: <name> <role> <agent> [model]",
-        "# The built-in console assistant is started by git agents start, not this file.",
-        "",
-    ]
-    for agent in agents:
-        line = f"{agent['name']} {agent['role']} {agent['engine']}"
-        if agent.get("model"):
-            line += f" {agent['model']}"
-        lines.append(line)
-    return "\n".join(lines).rstrip() + "\n"
+def remove_obsolete_runtime_files(repo: Repo) -> None:
+    for path in (
+        repo.state_dir / "default.team",
+        repo.state_dir / "tools" / "run_git_agents",
+    ):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except IsADirectoryError:
+            pass
+        except OSError:
+            pass
 
 
 def sync_runtime(repo: Repo) -> None:
     ensure_state(repo)
     copy_runtime_tree(("runtime", "bin"), repo.state_dir / "bin")
     copy_runtime_tree(("runtime", "tools"), repo.state_dir / "tools")
+    remove_obsolete_runtime_files(repo)
 
     rules, _rules_source = effective_rules_text(repo)
     write_text_atomic(repo.state_dir / "AGENTS.md", rules)
@@ -223,9 +232,6 @@ def sync_runtime(repo: Repo) -> None:
     for name in sorted(set(packaged_role_names()) | set(local_role_names(repo))):
         text, _source = effective_role_text(repo, name)
         write_text_atomic(roles_dir / f"{name}.md", text)
-
-    team, _team_source = effective_team(repo)
-    write_text_atomic(repo.state_dir / "default.team", legacy_team_text(team))
 
 
 def pid_is_running(pid: int | None) -> bool:
@@ -1208,11 +1214,48 @@ def cmd_restart(args: argparse.Namespace) -> int:
     )
 
 
+def team_agent_command(state_dir: Path, agent: dict[str, str]) -> list[str]:
+    engine = agent["engine"]
+    if engine == "pi-interactive":
+        command = [
+            str(state_dir / "tools" / "agent-pi-interactive"),
+            "--pi",
+            "--headless",
+        ]
+    elif engine == "pi":
+        command = [
+            str(state_dir / "tools" / "agent"),
+            "--pi",
+            "--headless",
+        ]
+    else:
+        raise UserError(f"invalid engine '{engine}' for agent '{agent['name']}'")
+    if agent.get("model"):
+        command.extend(["--model", agent["model"]])
+    command.extend([agent["role"], agent["name"]])
+    return command
+
+
+def record_team_agent_start(state_dir: Path, agent_name: str, pid: int) -> None:
+    run_dir = state_dir / "agents" / ".team-runs"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    write_text_atomic(run_dir / f"{agent_name}.pid", f"{pid}\n")
+
+
+def record_team_agent_exit(state_dir: Path, agent_name: str, rc: int) -> None:
+    run_dir = state_dir / "agents" / ".team-runs"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    write_text_atomic(run_dir / f"{agent_name}.last-status", f"{rc}\n")
+    write_text_atomic(run_dir / f"{agent_name}.last-exit", timestamp() + "\n")
+
+
 def cmd_supervisor(args: argparse.Namespace) -> int:
     root = Path(args.repo_root).resolve()
     state_dir = Path(args.state_dir).resolve()
+    repo = discover_repo(root)
     for name in STATE_SUBDIRS:
         (state_dir / name).mkdir(parents=True, exist_ok=True)
+    team, team_source = effective_team(repo)
     pid = os.getpid()
     write_text_atomic(state_dir / "runs" / "supervisor.pid", f"{pid}\n")
     write_text_atomic(
@@ -1225,13 +1268,14 @@ def cmd_supervisor(args: argparse.Namespace) -> int:
                 "no_console": bool(args.no_console),
                 "console_model": args.console_model or "",
                 "runtime_root": str(state_dir),
+                "team_source": team_source,
             },
             indent=2,
         )
         + "\n",
     )
     stopping = False
-    children: list[subprocess.Popen[bytes]] = []
+    children: list[ManagedProcess] = []
 
     def request_stop(_signum: int, _frame: Any) -> None:
         nonlocal stopping
@@ -1239,6 +1283,7 @@ def cmd_supervisor(args: argparse.Namespace) -> int:
 
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
+
     def launch(label: str, command: list[str]) -> subprocess.Popen[bytes]:
         log_path = state_dir / "logs" / f"{label}.log"
         log = log_path.open("ab")
@@ -1258,6 +1303,16 @@ def cmd_supervisor(args: argparse.Namespace) -> int:
             log.close()
         print(f"{timestamp()} started {label} pid={proc.pid}", flush=True)
         return proc
+
+    def start_managed(
+        label: str,
+        command: list[str],
+        agent_name: str | None = None,
+    ) -> ManagedProcess:
+        proc = launch(label, command)
+        if agent_name is not None:
+            record_team_agent_start(state_dir, agent_name, proc.pid)
+        return ManagedProcess(label=label, command=command, proc=proc, agent_name=agent_name)
 
     def terminate(proc: subprocess.Popen[bytes]) -> None:
         if proc.poll() is not None:
@@ -1286,45 +1341,41 @@ def cmd_supervisor(args: argparse.Namespace) -> int:
             ]
             if args.console_model:
                 console_command.extend(["--model", args.console_model])
-            children.append(
-                launch(
-                    "console",
-                    console_command,
-                )
-            )
+            children.append(start_managed("console", console_command))
         else:
             print(f"{timestamp()} console disabled", flush=True)
 
-        children.append(launch("team", [str(state_dir / "tools" / "run_git_agents")]))
+        if not team:
+            raise UserError(f"team config has no agents: {team_source}")
+        for agent in team:
+            children.append(
+                start_managed(
+                    f"agent-{agent['name']}",
+                    team_agent_command(state_dir, agent),
+                    agent_name=agent["name"],
+                )
+            )
 
         while not stopping:
             write_text_atomic(state_dir / "runs" / "supervisor-heartbeat", timestamp() + "\n")
-            for index, proc in enumerate(list(children)):
-                rc = proc.poll()
+            for managed in list(children):
+                rc = managed.proc.poll()
                 if rc is None:
                     continue
-                label = "console" if index == 0 and not args.no_console else "team"
-                print(f"{timestamp()} {label} exited rc={rc}; restarting", flush=True)
-                if label == "console":
-                    console_command = [
-                        str(state_dir / "tools" / "agent-pi-interactive"),
-                        "--pi",
-                        "--console",
-                        "--headless",
-                    ]
-                    if args.console_model:
-                        console_command.extend(["--model", args.console_model])
-                    children[index] = launch(
-                        "console",
-                        console_command,
-                    )
-                else:
-                    children[index] = launch("team", [str(state_dir / "tools" / "run_git_agents")])
+                if managed.agent_name is not None:
+                    record_team_agent_exit(state_dir, managed.agent_name, rc)
+                print(f"{timestamp()} {managed.label} exited rc={rc}; restarting", flush=True)
+                time.sleep(1)
+                if stopping:
+                    break
+                managed.proc = launch(managed.label, managed.command)
+                if managed.agent_name is not None:
+                    record_team_agent_start(state_dir, managed.agent_name, managed.proc.pid)
             time.sleep(1)
     finally:
         print(f"{timestamp()} supervisor stopping", flush=True)
-        for proc in reversed(children):
-            terminate(proc)
+        for managed in reversed(children):
+            terminate(managed.proc)
         try:
             (state_dir / "runs" / "supervisor.pid").unlink()
         except OSError:
