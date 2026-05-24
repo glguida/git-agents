@@ -1,8 +1,10 @@
 #!/bin/sh
 # SPDX-License-Identifier: MIT
 
-JOBS_DIR="${JOBS_DIR:-$GIT_AGENTS_ROOT/jobs}"
-TASKS_DIR="${TASKS_DIR:-$GIT_AGENTS_ROOT/tasks}"
+GIT_AGENTS_STATE_DIR="${GIT_AGENTS_STATE_DIR:-$GIT_AGENTS_ROOT/state}"
+JOBS_DIR="${JOBS_DIR:-$GIT_AGENTS_STATE_DIR/jobs}"
+TASKS_DIR="${TASKS_DIR:-$GIT_AGENTS_STATE_DIR/tasks}"
+AGENTS_DIR="${AGENTS_DIR:-$GIT_AGENTS_STATE_DIR/agents}"
 VALID_STATUSES="${VALID_STATUSES:-pending claimed running done failed}"
 VALID_TASK_STATES="${VALID_TASK_STATES:-open done}"
 
@@ -143,7 +145,7 @@ clear_agent_current_job() {
     is_safe_name "$agent_id" || return 0
     [ -n "$job_id" ] || return 0
 
-    current_file="$GIT_AGENTS_ROOT/agents/$agent_id/current-job"
+    current_file="$AGENTS_DIR/$agent_id/current-job"
     [ -f "$current_file" ] || return 0
 
     current="$(cat "$current_file" 2>/dev/null || true)"

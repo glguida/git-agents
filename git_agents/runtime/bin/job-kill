@@ -131,7 +131,7 @@ fi
 
 agent_dir=""
 if [ -n "$agent_id" ]; then
-    agent_dir="$GIT_AGENTS_ROOT/agents/$agent_id"
+    agent_dir="$AGENTS_DIR/$agent_id"
 fi
 
 engine_pid="$(read_pid_file "$JOB_DIR/engine.pid")"

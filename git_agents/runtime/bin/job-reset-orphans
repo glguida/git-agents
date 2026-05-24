@@ -28,7 +28,7 @@ for job_dir in "$JOBS_DIR"/*; do
         agent_id="$(cat "$job_dir/agent-id" 2>/dev/null || true)"
         if [ -z "$agent_id" ]; then
             reset_reason="empty agent-id"
-        elif [ ! -d "$GIT_AGENTS_ROOT/agents/$agent_id" ]; then
+        elif [ ! -d "$AGENTS_DIR/$agent_id" ]; then
             reset_reason="agent '$agent_id' has no agents/$agent_id directory"
         fi
     fi

@@ -19,14 +19,15 @@ else
     echo "Created tasks/ directory."
 fi
 
-if [ -d "$GIT_AGENTS_ROOT/agents" ]; then
+if [ -d "$AGENTS_DIR" ]; then
     echo "agents/ directory already exists."
 else
-    mkdir -p "$GIT_AGENTS_ROOT/agents"
+    mkdir -p "$AGENTS_DIR"
     echo "Created agents/ directory."
 fi
 
 echo "GitAgents initialized at: $GIT_AGENTS_ROOT"
+echo "GitAgents state at: $GIT_AGENTS_STATE_DIR"
 echo ""
 echo "Next steps:"
 echo "  1. Write a complete task:  \$EDITOR /tmp/my-first-task.md"

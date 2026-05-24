@@ -11,6 +11,7 @@ const TRANSCRIPT_SECTION_TITLES = new Set(["User", "Assistant", "Thinking", "Rea
 
 const state = {
   snapshot: null,
+  instances: [],
   selected: null,
   activeFile: null,
   live: false,
@@ -53,6 +54,8 @@ const primaryStages = ["plan", "build", "review", "integrate"];
 const optionalStages = ["docs", "rebase", "notify", "other"];
 
 const els = {
+  instanceField: document.querySelector("#instanceField"),
+  instanceSelect: document.querySelector("#instanceSelect"),
   rootInput: document.querySelector("#rootInput"),
   searchInput: document.querySelector("#searchInput"),
   refreshButton: document.querySelector("#refreshButton"),
@@ -73,7 +76,12 @@ document.querySelectorAll(".rail-button").forEach((button) => {
   button.addEventListener("click", () => setView(button.dataset.view));
 });
 
-els.refreshButton.addEventListener("click", () => loadSnapshot());
+els.refreshButton.addEventListener("click", () => refreshAll());
+els.instanceSelect.addEventListener("change", () => {
+  state.root = els.instanceSelect.value;
+  clearSelection();
+  loadSnapshot();
+});
 els.searchInput.addEventListener("input", () => {
   state.query = els.searchInput.value.trim().toLowerCase();
   render();
@@ -90,14 +98,36 @@ window.addEventListener("keydown", (event) => {
 window.addEventListener("hashchange", () => setView(initialView(), { updateHash: false }));
 
 setView(state.view, { updateHash: false });
-loadSnapshot();
-setInterval(() => loadSnapshot({ silent: true }), 30000);
+refreshAll();
+setInterval(() => refreshAll({ silent: true }), 30000);
+
+async function refreshAll(options = {}) {
+  await loadInstances(options);
+  await loadSnapshot(options);
+}
+
+async function loadInstances(options = {}) {
+  const { silent = false } = options;
+  try {
+    const response = await fetch("/api/instances");
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "instances failed");
+    state.instances = payload.instances || [];
+    if (!state.root) state.root = payload.defaultRoot || "";
+    if (state.root && !state.instances.some((instance) => instance.stateRoot === state.root)) {
+      state.root = payload.defaultRoot || state.root;
+    }
+    renderInstanceSelector();
+  } catch (error) {
+    if (!silent) toast(error.message);
+  }
+}
 
 async function loadSnapshot(options = {}) {
   const { silent = false } = options;
   try {
     setBusy(!silent);
-    const response = await fetch("/api/snapshot");
+    const response = await fetch(apiUrl("/api/snapshot"));
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "snapshot failed");
 
@@ -117,6 +147,27 @@ async function loadSnapshot(options = {}) {
   } finally {
     setBusy(false);
   }
+}
+
+function apiUrl(path, params = {}) {
+  const query = new URLSearchParams(params);
+  if (state.root) query.set("root", state.root);
+  const suffix = query.toString();
+  return suffix ? `${path}?${suffix}` : path;
+}
+
+function renderInstanceSelector() {
+  const instances = state.instances || [];
+  els.instanceField.hidden = instances.length <= 1;
+  els.instanceSelect.innerHTML = "";
+  for (const instance of instances) {
+    const option = document.createElement("option");
+    option.value = instance.stateRoot;
+    option.textContent = `${instance.title || instance.stateRoot}${instance.running ? "" : " (stopped)"}`;
+    option.title = instance.repoRoot || instance.stateRoot;
+    els.instanceSelect.appendChild(option);
+  }
+  if (state.root) els.instanceSelect.value = state.root;
 }
 
 function setBusy(active) {
@@ -404,7 +455,7 @@ function renderChat() {
   const placeholder = inputReady ? "Message console" : "Console agent is not ready";
   const existingInput = document.querySelector("#chatInput");
   if (existingInput) state.chatDraft = existingInput.value;
-  const actionLabel = isBusy ? "Stop" : "Send";
+  const actionLabel = isBusy ? (state.chatDraft.trim() ? "Steer" : "Stop") : "Send";
   const actionDisabled = !inputReady || (!isBusy && !state.chatDraft.trim());
 
   els.chat.innerHTML = `
@@ -478,7 +529,7 @@ function syncChatAction(agent) {
   const actionButton = document.querySelector("#chatActionButton");
   if (!input || !actionButton) return;
   const isBusy = Boolean(agent?.busy);
-  actionButton.textContent = isBusy ? "Stop" : "Send";
+  actionButton.textContent = isBusy ? (input.value.trim() ? "Steer" : "Stop") : "Send";
   actionButton.classList.toggle("stop", isBusy);
   actionButton.classList.toggle("send", !isBusy);
   actionButton.disabled = isBusy ? !agent?.inputReady : !input.value.trim() || !agent?.inputReady;
@@ -487,12 +538,19 @@ function syncChatAction(agent) {
 function submitChatAction(agent, input) {
   if (agent?.busy) {
     if (!agent.inputReady) return;
-    sendAgentInput(agent.id, "Stop.", "steer", {
+    const message = input.value.trim() || "Stop.";
+    const hasCustomSteer = Boolean(input.value.trim());
+    sendAgentInput(agent.id, message, "steer", {
       input,
-      clearInput: false,
+      clearInput: hasCustomSteer,
       refreshInspector: false,
       refreshChat: true,
-      successMessage: "Stop sent"
+      successMessage: hasCustomSteer ? "Steer sent" : "Stop sent"
+    }).then((sent) => {
+      if (sent && hasCustomSteer) {
+        state.chatDraft = "";
+        autoSizeChatInput(input);
+      }
     });
     return;
   }
@@ -535,7 +593,13 @@ async function refreshChatTranscript(options = {}) {
 
   state.chatTranscriptInFlight = true;
   try {
-    const response = await fetch(`/api/file?type=agent&id=${encodeURIComponent(agent.id)}&file=transcript.log&tail=1&maxBytes=${CHAT_TRANSCRIPT_MAX_BYTES}`);
+    const response = await fetch(apiUrl("/api/file", {
+      type: "agent",
+      id: agent.id,
+      file: "transcript.log",
+      tail: "1",
+      maxBytes: String(CHAT_TRANSCRIPT_MAX_BYTES)
+    }));
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "transcript load failed");
     const renderKey = `${payload.size || 0}:${payload.text?.length || 0}`;
@@ -559,7 +623,7 @@ async function refreshChatState() {
   if (state.chatStateInFlight) return;
   state.chatStateInFlight = true;
   try {
-    const response = await fetch("/api/snapshot");
+    const response = await fetch(apiUrl("/api/snapshot"));
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "snapshot failed");
     const previousDraft = document.querySelector("#chatInput")?.value ?? state.chatDraft;
@@ -1164,7 +1228,7 @@ async function sendAgentInput(agentId, value, mode, options = {}) {
   const message = String(value || "").trim();
   if (!message) return false;
   try {
-    const response = await fetch(`/api/agent-input?id=${encodeURIComponent(agentId)}`, {
+    const response = await fetch(apiUrl("/api/agent-input", { id: agentId }), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message, mode })
@@ -1195,7 +1259,12 @@ async function loadFile(type, id, file, tail = false, options = {}) {
   const renderMarkdown = isMarkdownFile(file);
   pane.className = renderMarkdown ? "markdown-render" : "preflight";
   try {
-    const response = await fetch(`/api/file?type=${encodeURIComponent(type)}&id=${encodeURIComponent(id)}&file=${encodeURIComponent(file)}&tail=${tail ? "1" : "0"}`);
+    const response = await fetch(apiUrl("/api/file", {
+      type,
+      id,
+      file,
+      tail: tail ? "1" : "0"
+    }));
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "file load failed");
     if (renderMarkdown) {

@@ -93,46 +93,123 @@ def read_job_owner(job_dir: Path) -> str:
         return ""
 
 
+def has_pi_session_history(session_dir: Path) -> bool:
+    if not session_dir.is_dir():
+        return False
+    try:
+        for path in session_dir.rglob("*"):
+            if path.is_file() and not path.name.endswith(".lock"):
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def build_pi_rpc_command(
+    model: str | None,
+    console: bool,
+    prompt: str,
+    session_dir: Path,
+) -> list[str]:
+    command = ["pi", "--mode", "rpc"]
+    if model:
+        command.extend(["--model", model])
+    if console:
+        command.extend(["--append-system-prompt", prompt])
+    command.extend(["--session-dir", str(session_dir)])
+    if console and has_pi_session_history(session_dir):
+        command.append("--continue")
+    return command
+
+
+def rpc_streaming_state(event: dict[str, Any]) -> bool | None:
+    typ = event.get("type")
+    if typ in ("agent_start", "turn_start"):
+        return True
+    if typ in ("agent_end", "turn_end"):
+        return False
+    return None
+
+
+def file_has_content(path: Path) -> bool:
+    try:
+        return path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def restart_context(
+    transcript_path: Path | None,
+    include_restart_context: bool,
+    crash_path: Path | None,
+) -> str:
+    if not transcript_path or not include_restart_context:
+        return ""
+    parts = [
+        "This console has an existing transcript from a previous run.",
+        f"Before answering after this restart, read enough recent history from {transcript_path} to recover the conversation context.",
+    ]
+    if crash_path and crash_path.is_file():
+        parts.append(
+            f"The previous Pi process crashed during an active turn. Read {crash_path} and the transcript, then continue if possible; if the lost turn cannot be recovered, ask the human to resend it."
+        )
+    return "\n".join(parts)
+
+
+def recovery_prompt(transcript_path: Path, crash_path: Path) -> str:
+    return (
+        "Recover after an interactive console restart. "
+        f"Read the recent conversation in {transcript_path}. "
+        f"Also read the crash marker at {crash_path}. "
+        "If you can continue the interrupted turn from the transcript, do so. "
+        "If the lost turn cannot be recovered, tell the human that the previous turn crashed and ask them to resend the missing request."
+    )
+
+
 def build_prompt(
     agent_name: str,
     console: bool,
     root: Path,
     repo_root: Path | None = None,
     job_id: str = "",
-    role_text: str = "",
+    transcript_path: Path | None = None,
+    include_restart_context: bool = False,
+    crash_path: Path | None = None,
 ) -> str:
+    rules_path = agent_mod.protocol_path(root, repo_root)
+    state_root = agent_mod.state_dir(root)
     if not console:
         return "\n".join(
             part
             for part in (
                 f"You are agent {agent_name}.",
-                f"Your GitAgents runtime root is: {root}",
+                f"Your GitAgents root is: {root}",
+                f"Your GitAgents state directory is: {state_root}",
                 f"Your target repository root is: {repo_root}" if repo_root else "",
                 f"Your assigned job is: {job_id}" if job_id else "",
                 (
-                    f"Read {root / 'AGENTS.md'} before working. It is the "
-                    "effective generic GitAgents protocol, copied from "
-                    "repo-local GitAgents config when present and from packaged "
-                    f"defaults otherwise. Use the runtime bin tools under {root / 'bin'}."
+                    f"Read {rules_path} before working. It is the GitAgents-owned "
+                    "generic protocol installed by `git agents init` "
+                    "and refreshed with `git agents update`. "
+                    f"Use the GitAgents command helpers under {root / 'bin'}."
                 ),
-                "Treat paths such as agents/, jobs/, tasks/, roles/, and bin/ in GitAgents instructions as relative to the runtime root.",
+                "Treat bin/ and roles/ as relative to the GitAgents root. Treat tasks/, jobs/, agents/, runs/, and logs/ as relative to the GitAgents state directory.",
             )
             if part
         )
+    role_path = root / "roles" / "console.md"
+    restart_text = restart_context(transcript_path, include_restart_context, crash_path)
     return f"""You are agent {agent_name}.
 
-You are the GitAgents console assistant.
-You are not assigned a job and do not have a current-job.
-Your GitAgents runtime root is: {root}
+You are the GitAgents console. You interact directly with a human.
+Your GitAgents root is: {root}
+Your GitAgents state directory is: {state_root}
 {"Your target repository root is: " + str(repo_root) if repo_root else ""}
-Read {root / 'AGENTS.md'} before inspecting or changing GitAgents state. It is the effective generic GitAgents protocol, copied from repo-local GitAgents config when present and from packaged defaults otherwise.
-Use the runtime bin tools under {root / 'bin'} to inspect and manage tasks, jobs, and agents.
-Treat paths such as agents/, jobs/, tasks/, roles/, and bin/ in GitAgents instructions as relative to the runtime root.
-Help the human turn rough requests into clear task specs and dispatch them when asked.
-
-Console role instructions:
-
-{role_text.strip()}
+Read {rules_path} before inspecting or changing GitAgents state. It is the GitAgents-owned generic protocol installed by `git agents init` and refreshed with `git agents update`.
+Read {role_path} for your console role instructions.
+Use the GitAgents command helpers under {root / 'bin'}.
+Treat bin/ and roles/ as relative to the GitAgents root. Treat tasks/, jobs/, agents/, runs/, and logs/ as relative to the GitAgents state directory.
+{restart_text}
 """
 
 
@@ -183,17 +260,28 @@ def main() -> int:
             agent_mod.die(f"unexpected job-claim output: {claim}")
 
         agent_mod.write_file(agent_dir / "current-job", job_id)
-        job_dir = ROOT / "jobs" / job_id
+        job_dir = agent_mod.state_dir(ROOT) / "jobs" / job_id
         agent_mod.write_runtime_pids(agent_dir, job_dir)
-
-    repo_root = agent_mod.read_repo_root(ROOT)
-    role_text = role_file.read_text(encoding="utf-8", errors="replace") if args.console else ""
-    prompt = build_prompt(args.agent_name, args.console, ROOT, repo_root, job_id, role_text)
-    agent_mod.write_file(agent_dir / "prompt.md", prompt)
 
     agent_transcript = agent_dir / "transcript.log"
     agent_error = agent_dir / "error.log"
     agent_busy = agent_dir / "busy"
+    last_crash = agent_dir / "last-crash"
+    had_transcript = file_has_content(agent_transcript)
+
+    repo_root = agent_mod.read_repo_root(ROOT)
+    prompt = build_prompt(
+        args.agent_name,
+        args.console,
+        ROOT,
+        repo_root,
+        job_id,
+        transcript_path=agent_transcript,
+        include_restart_context=args.console and had_transcript,
+        crash_path=last_crash,
+    )
+    agent_mod.write_file(agent_dir / "prompt.md", prompt)
+
     agent_transcript.touch()
     agent_error.touch()
     agent_mod.write_file(agent_busy, "0\n")
@@ -284,12 +372,7 @@ def main() -> int:
                     return
 
         if args.engine == "pi":
-            command = ["pi", "--mode", "rpc"]
-            if args.model:
-                command.extend(["--model", args.model])
-            if args.console:
-                command.extend(["--append-system-prompt", prompt])
-            command.extend(["--session-dir", str(agent_dir / "pi-session")])
+            command = build_pi_rpc_command(args.model, args.console, prompt, agent_dir / "pi-session")
 
             proc = subprocess.Popen(
                 command,
@@ -323,13 +406,12 @@ def main() -> int:
                         renderer.render_line(raw)
                         continue
                     if isinstance(event, dict):
+                        streaming_state = rpc_streaming_state(event)
+                        if streaming_state is not None:
+                            set_streaming(streaming_state)
+                            if not streaming_state:
+                                agent_mod.remove_file(last_crash)
                         typ = event.get("type")
-                        if typ in ("agent_start", "turn_start"):
-                            set_streaming(True)
-                        elif typ in ("agent_end", "turn_end"):
-                            set_streaming(False)
-                        if typ == "response":
-                            set_streaming(False)
                         if typ == "response" and event.get("success") is False:
                             transcript.event("pi rpc error", str(event.get("error") or event))
                             continue
@@ -381,7 +463,16 @@ def main() -> int:
             for thread in threads:
                 thread.start()
 
-            if not args.console:
+            if args.console and last_crash.is_file():
+                set_streaming(True)
+                recovery = recovery_prompt(agent_transcript, last_crash)
+                if not write_json_line(
+                    proc.stdin,
+                    {"id": "restart-recovery", "type": "prompt", "message": recovery},
+                    stdin_lock,
+                ):
+                    set_streaming(False)
+            elif not args.console:
                 set_streaming(True)
                 if not write_json_line(proc.stdin, {"id": "initial", "type": "prompt", "message": prompt}, stdin_lock):
                     set_streaming(False)
@@ -393,6 +484,22 @@ def main() -> int:
             if proc.poll() is None:
                 agent_mod.terminate_process(proc, timeout=5)
             rc = proc.returncode if proc.returncode is not None else 1
+            was_streaming_at_exit = is_streaming.is_set()
+            if rc != 0:
+                crash_detail = "\n".join(
+                    (
+                        f"exit: {rc}",
+                        f"active_turn: {'yes' if was_streaming_at_exit else 'no'}",
+                        f"transcript: {agent_transcript}",
+                    )
+                )
+                if was_streaming_at_exit:
+                    transcript.event("interactive turn crashed", crash_detail)
+                    agent_mod.write_file(last_crash, crash_detail)
+                else:
+                    transcript.event("interactive process exited nonzero", crash_detail)
+            elif not was_streaming_at_exit:
+                agent_mod.remove_file(last_crash)
             transcript.event("interactive run end", f"exit: {rc}")
             return rc
 

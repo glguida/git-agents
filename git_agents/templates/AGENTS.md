@@ -27,16 +27,24 @@ still applies.
 
 ## Tool Boundary
 
-git-agents tools under `bin/` are the interface to local task and job state stored
-under `tasks/` and `jobs/`.
+git-agents tools under `bin/` are the interface to local task and job state
+stored under the GitAgents state directory.
 
-All references to `bin/`, `agents/`, `jobs/`, `tasks/`, and `roles/` are
-relative to the GitAgents runtime root. The launcher tells agents the effective
-runtime `AGENTS.md` path; that file is copied from repo-local GitAgents config
-when present, otherwise from the packaged GitAgents defaults. If an agent runs
-from the target repository root, it must use absolute runtime paths such as
-`<runtime-root>/bin/task-list`, or change directory to the runtime root before
-using relative runtime paths.
+The launcher tells agents both paths:
+
+- the GitAgents root, normally `.git-agents`
+- the GitAgents state directory, normally `.git-agents/state`
+
+References to `bin/` and `roles/` are relative to the GitAgents root.
+References to `agents/`, `jobs/`, `tasks/`, `runs/`, and `logs/` are relative
+to the GitAgents state directory. The launcher also tells agents the repo-local
+`AGENTS.md` path; that file is installed by `git agents init` and refreshed
+with `git agents update` because the protocol and helper commands are versioned
+together.
+
+If an agent runs from the target repository root, it must use absolute paths
+such as `<git-agents-root>/bin/task-list`, or change directory to the
+GitAgents root before using relative `bin/` paths.
 
 Do not bypass the git-agents tools, edit queue machinery by hand, or debug/repair
 the git-agents task or job machinery while doing a normal project job. If a tool
@@ -51,10 +59,9 @@ The built-in console is not assigned a queued job. It must read this file and
 have a current job and must not run `job-done`, `job-fail`, or `job-release` for
 itself.
 
-The console helps the human inspect state, prepare task specs, and dispatch
-tasks when asked. For maintenance actions that change queue state, explain the
-intended action and ask first unless the human already explicitly requested
-that exact action.
+The console's user-facing purpose and behavior are defined by
+`roles/console.md`. The generic protocol only defines where the console runs
+and how it must interact with GitAgents state.
 
 ## Startup
 
@@ -120,6 +127,18 @@ Every queued agent must:
 - create planner notifications on the same task unless a planner explicitly
   creates a new task
 
+## No Premature Closure
+
+Do not optimize for reaching a terminal job state. A terminal transition is only
+bookkeeping after the assigned role's responsibility has actually been satisfied
+or is concretely blocked.
+
+Do not create a follow-up job, planner notification, or documentation request as
+a substitute for work your current role can reasonably perform. First inspect
+the relevant source, docs, logs, tests, and artifacts. If the job remains
+blocked, record the exact evidence and then use the normal problem-handling
+path.
+
 Task creation is allowed only in these cases:
 
 - the console creates a top-level task from a direct human request
@@ -179,7 +198,7 @@ current process.
 
 ## Job Layout
 
-Each job is a directory under `jobs/`:
+Each job is a directory under `jobs/` in the GitAgents state directory:
 
 ```text
 jobs/<job-id>/
@@ -195,7 +214,8 @@ jobs/<job-id>/
 
 ## Task Layout
 
-Each task is a long-lived objective under `tasks/`:
+Each task is a long-lived objective under `tasks/` in the GitAgents state
+directory:
 
 ```text
 tasks/<task-id>/

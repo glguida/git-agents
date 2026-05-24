@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+"""Forward pending console jobs to the GitAgents console agent."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import signal
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
+
+from console_input import send_console_input
+
+
+STOP = threading.Event()
+AGENT_ID = "console-notifier"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Forward GitAgents console jobs.")
+    parser.add_argument(
+        "--state-dir",
+        default=os.environ.get("GIT_AGENTS_STATE_DIR", ".git-agents/state"),
+        help="GitAgents state directory. Defaults to GIT_AGENTS_STATE_DIR or .git-agents/state.",
+    )
+    parser.add_argument(
+        "--poll-seconds",
+        type=float,
+        default=1.0,
+        help="seconds between console job scans. Defaults to 1.",
+    )
+    parser.add_argument("--once", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    if args.poll_seconds <= 0:
+        parser.error("--poll-seconds must be greater than zero")
+    return args
+
+
+def timestamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def write_text_atomic(path: Path, text: str) -> None:
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
+def append_job_log(job_dir: Path, summary: str, detail: str = "") -> None:
+    with (job_dir / "log.md").open("a", encoding="utf-8") as stream:
+        stream.write(f"## {timestamp()} - {summary}\n\n")
+        if detail:
+            stream.write(f"{detail}\n\n")
+
+
+def release_claim(job_dir: Path) -> None:
+    try:
+        (job_dir / "agent-id").unlink()
+    except FileNotFoundError:
+        pass
+    write_text_atomic(job_dir / "status", "pending")
+    try:
+        (job_dir / "lock").rmdir()
+    except OSError:
+        pass
+
+
+def claim_console_job(job_dir: Path) -> bool:
+    if read_text(job_dir / "role") != "console":
+        return False
+    if read_text(job_dir / "status") != "pending":
+        return False
+    try:
+        (job_dir / "lock").mkdir()
+    except OSError:
+        return False
+    write_text_atomic(job_dir / "agent-id", AGENT_ID)
+    write_text_atomic(job_dir / "status", "claimed")
+    return True
+
+
+def console_job_message(job_id: str, spec: str) -> str:
+    return f"Console job: {job_id}\n\n{spec.rstrip()}"
+
+
+def deliver_console_job(state_dir: Path, job_dir: Path) -> bool:
+    job_id = job_dir.name
+    if not claim_console_job(job_dir):
+        return False
+    spec = read_text(job_dir / "spec.md")
+    if not spec:
+        append_job_log(job_dir, "Failed", "Console job has an empty spec.")
+        write_text_atomic(job_dir / "status", "failed")
+        try:
+            (job_dir / "lock").rmdir()
+        except OSError:
+            pass
+        print(f"{job_id}: failed empty console job", flush=True)
+        return False
+    write_text_atomic(job_dir / "status", "running")
+    if not send_console_input(state_dir, console_job_message(job_id, spec)):
+        release_claim(job_dir)
+        return False
+    append_job_log(job_dir, "Done", "Forwarded console job to the interactive console.")
+    write_text_atomic(job_dir / "status", "done")
+    try:
+        (job_dir / "lock").rmdir()
+    except OSError:
+        pass
+    print(f"{job_id}: forwarded console job", flush=True)
+    return True
+
+
+def scan_once(state_dir: Path) -> int:
+    jobs_dir = state_dir / "jobs"
+    try:
+        entries = sorted(jobs_dir.iterdir(), key=lambda path: path.name)
+    except FileNotFoundError:
+        return 0
+
+    delivered = 0
+    for entry in entries:
+        if STOP.is_set():
+            break
+        if entry.name.startswith(".") or not entry.is_dir():
+            continue
+        if deliver_console_job(state_dir, entry):
+            delivered += 1
+    return delivered
+
+
+def request_stop(_signum: int, _frame) -> None:
+    STOP.set()
+
+
+def main() -> int:
+    args = parse_args()
+    state_dir = Path(args.state_dir).resolve()
+    signal.signal(signal.SIGTERM, request_stop)
+    signal.signal(signal.SIGINT, request_stop)
+
+    if args.once:
+        scan_once(state_dir)
+        return 0
+
+    while not STOP.is_set():
+        scan_once(state_dir)
+        STOP.wait(args.poll_seconds)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

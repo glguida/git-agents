@@ -3,7 +3,6 @@
 set -eu
 
 GIT_AGENTS_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-AGENTS_DIR="$GIT_AGENTS_ROOT/agents"
 
 . "$GIT_AGENTS_ROOT/bin/lib-git-agents"
 

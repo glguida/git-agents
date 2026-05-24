@@ -35,12 +35,21 @@ class PackagingTest(unittest.TestCase):
             self.assertEqual(len(wheels), 1)
             with zipfile.ZipFile(wheels[0]) as wheel:
                 names = set(wheel.namelist())
+                entry_points = wheel.read("git_agents-0.1.0.dist-info/entry_points.txt").decode()
             self.assertIn(
                 "git_agents-0.1.0.data/data/share/man/man1/git-agents.1",
                 names,
             )
+            self.assertIn("gitagents-dashboard = git_agents.dashboard:main", entry_points)
+            self.assertNotIn("git-agents-dashboard = git_agents.dashboard:main", entry_points)
+            self.assertIn("git_agents/templates/AGENTS.md", names)
+            self.assertNotIn("git_agents/runtime/AGENTS.md", names)
             self.assertIn("git_agents/runtime/bin/job-kill", names)
             self.assertIn("git_agents/runtime/bin/job-reset", names)
+            self.assertIn("git_agents/runtime/tools/console-input", names)
+            self.assertIn("git_agents/runtime/tools/console-notifier", names)
+            self.assertIn("git_agents/runtime/tools/console_input.py", names)
+            self.assertIn("git_agents/runtime/tools/heartbeat", names)
 
 
 if __name__ == "__main__":

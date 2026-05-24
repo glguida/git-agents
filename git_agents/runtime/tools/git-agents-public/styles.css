@@ -196,6 +196,7 @@ h1 {
   min-width: 0;
 }
 
+.instance-field,
 .root-field,
 .search-field {
   display: flex;
@@ -209,11 +210,16 @@ h1 {
   overflow: hidden;
 }
 
+.instance-field {
+  width: 220px;
+}
+
 .root-field {
   flex: 1;
   max-width: 620px;
 }
 
+.instance-field span,
 .root-field span {
   flex: 0 0 auto;
   padding: 0 10px 0 12px;
@@ -224,6 +230,7 @@ h1 {
   letter-spacing: 0.06em;
 }
 
+.instance-field select,
 .root-field code,
 .search-field input {
   flex: 1 1 auto;
@@ -234,6 +241,12 @@ h1 {
   background: transparent;
   color: var(--ink);
   text-overflow: ellipsis;
+}
+
+.instance-field select {
+  appearance: none;
+  height: 100%;
+  padding-right: 10px;
 }
 
 .root-field code {
@@ -1387,6 +1400,7 @@ h1 {
     flex-direction: column;
   }
 
+  .instance-field,
   .root-field,
   .search-field {
     width: 100%;

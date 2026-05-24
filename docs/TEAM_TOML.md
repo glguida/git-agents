@@ -1,10 +1,9 @@
 # team.toml
 
 `team.toml` is the repo-local configuration file that defines which queued
-GitAgents agents are launched by `git agents start`.
-
-It is optional. If `.git-agents/team.toml` does not exist, GitAgents uses the
-packaged default team:
+GitAgents agents are launched by `git agents start`. `git agents init` installs
+the default file at `.git-agents/team.toml`. If the file is missing, GitAgents
+can still fall back to the packaged default team:
 
 ```toml
 [[agents]]
@@ -33,7 +32,7 @@ engine = "pi"
 Create or materialize the file with one of these commands:
 
 ```sh
-git agents init --tracked-config
+git agents init
 git agents team edit
 git agents team add my-agent --role implementer
 ```

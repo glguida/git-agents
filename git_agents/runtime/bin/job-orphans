@@ -29,7 +29,7 @@ for job_dir in "$JOBS_DIR"/*; do
         continue
     fi
 
-    if [ ! -d "$GIT_AGENTS_ROOT/agents/$agent_id" ]; then
+    if [ ! -d "$AGENTS_DIR/$agent_id" ]; then
         echo "$job_name (agent '$agent_id' has no agents/$agent_id directory, status: $status)"
     fi
 done

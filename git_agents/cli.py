@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import argparse
 import difflib
-import errno
+import hashlib
 import importlib.util
-import html
 import json
-import mimetypes
 import os
 import re
 import shlex
@@ -17,11 +15,9 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
 
 try:
     import tomllib
@@ -33,8 +29,8 @@ PACKAGE = "git_agents"
 CONFIG_DIR = ".git-agents"
 STATE_DIR_NAME = "state"
 STATE_IGNORE_PATTERN = f"/{CONFIG_DIR}/{STATE_DIR_NAME}/"
-DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 4173
+DEFAULT_REGISTRY_DIR = "~/.gitagents"
+DEFAULT_HEARTBEAT_MINUTES = 15
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 VALID_ENGINES = {"pi", "pi-interactive"}
 ENGINE_COMMAND = {
@@ -80,6 +76,18 @@ def validate_name(label: str, value: str) -> None:
         raise UserError(
             f"invalid {label} '{value}': use letters, numbers, dot, underscore, or hyphen"
         )
+
+
+def effective_heartbeat(
+    no_console: bool,
+    no_heartbeat: bool,
+    heartbeat: int,
+) -> int:
+    if no_console or no_heartbeat:
+        return 0
+    if heartbeat < 1:
+        raise UserError("heartbeat must be at least 1 minute; use --no-heartbeat to disable it")
+    return heartbeat
 
 
 def run_git(args: list[str], cwd: Path | None = None) -> str:
@@ -138,6 +146,70 @@ def write_text_atomic(path: Path, text: str) -> None:
     tmp.replace(path)
 
 
+def registry_dir() -> Path:
+    return Path(os.environ.get("GIT_AGENTS_REGISTRY_DIR", DEFAULT_REGISTRY_DIR)).expanduser()
+
+
+def registry_instance_id(repo_root: Path) -> str:
+    digest = hashlib.sha256(str(repo_root.resolve()).encode("utf-8")).hexdigest()
+    repo_name = re.sub(r"[^A-Za-z0-9._-]+", "-", repo_root.name).strip(".-")
+    if not repo_name:
+        repo_name = "repo"
+    return f"{repo_name}-{digest[:12]}"
+
+
+def legacy_registry_instance_id(repo_root: Path) -> str:
+    digest = hashlib.sha256(str(repo_root.resolve()).encode("utf-8")).hexdigest()
+    return digest[:16]
+
+
+def registry_instances_dir() -> Path:
+    return registry_dir() / "instances"
+
+
+def registry_instance_path(repo: Repo) -> Path:
+    return registry_instances_dir() / registry_instance_id(repo.root)
+
+
+def write_registry_instance(repo: Repo) -> None:
+    path = registry_instance_path(repo)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_path = registry_instances_dir() / f"{legacy_registry_instance_id(repo.root)}.json"
+    try:
+        legacy_path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+    target = repo.config_dir.resolve()
+    if path.is_symlink():
+        try:
+            if path.resolve(strict=True) == target:
+                return
+        except OSError:
+            pass
+        path.unlink()
+    elif path.exists():
+        raise UserError(f"cannot register GitAgents instance; path already exists: {path}")
+
+    os.symlink(target, path, target_is_directory=True)
+
+
+def remove_registry_instance(repo: Repo) -> None:
+    path = registry_instance_path(repo)
+    legacy_path = registry_instances_dir() / f"{legacy_registry_instance_id(repo.root)}.json"
+    for candidate in (path, legacy_path):
+        try:
+            candidate.unlink()
+        except FileNotFoundError:
+            pass
+        except IsADirectoryError:
+            pass
+        except OSError:
+            pass
+
+
 def read_text(path: Path, fallback: str = "", max_bytes: int = 512 * 1024) -> str:
     try:
         with path.open("rb") as stream:
@@ -191,12 +263,19 @@ def ensure_state(repo: Repo) -> None:
         )
 
 
-def copy_runtime_tree(src_parts: tuple[str, ...], destination: Path) -> None:
+def copy_runtime_tree(
+    src_parts: tuple[str, ...],
+    destination: Path,
+    skip_names: set[str] | None = None,
+) -> None:
+    skip_names = skip_names or set()
     src = package_path(*src_parts)
     for item in src.iterdir():
+        if item.name in skip_names or item.name == "__pycache__" or item.name.endswith(".pyc"):
+            continue
         target = destination / item.name
         if item.is_dir():
-            copy_runtime_tree((*src_parts, item.name), target)
+            copy_runtime_tree((*src_parts, item.name), target, skip_names=skip_names)
             continue
         data = item.read_bytes()
         executable = data.startswith(b"#!")
@@ -205,7 +284,11 @@ def copy_runtime_tree(src_parts: tuple[str, ...], destination: Path) -> None:
 
 def remove_obsolete_runtime_files(repo: Repo) -> None:
     for path in (
+        repo.config_dir / "bin" / "notification-create",
+        repo.config_dir / "tools" / "git-agents-ui",
+        repo.state_dir / "AGENTS.md",
         repo.state_dir / "default.team",
+        repo.state_dir / "runs" / "server.json",
         repo.state_dir / "tools" / "run_git_agents",
     ):
         try:
@@ -217,21 +300,53 @@ def remove_obsolete_runtime_files(repo: Repo) -> None:
         except OSError:
             pass
 
+    for path in (
+        repo.state_dir / "bin",
+        repo.state_dir / "tools",
+        repo.state_dir / "roles",
+        repo.config_dir / "tools" / "git-agents-public",
+    ):
+        try:
+            shutil.rmtree(path)
+        except FileNotFoundError:
+            pass
+        except NotADirectoryError:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        except OSError:
+            pass
+
+
+def sync_runtime_commands(repo: Repo) -> None:
+    copy_runtime_tree(("runtime", "bin"), repo.config_dir / "bin")
+    copy_runtime_tree(
+        ("runtime", "tools"),
+        repo.config_dir / "tools",
+        skip_names={"git-agents-ui", "git-agents-public"},
+    )
+    remove_obsolete_runtime_files(repo)
+
+
+def sync_runtime_roles(repo: Repo) -> None:
+    materialize_all_roles(repo)
+
 
 def sync_runtime(repo: Repo) -> None:
     ensure_state(repo)
-    copy_runtime_tree(("runtime", "bin"), repo.state_dir / "bin")
-    copy_runtime_tree(("runtime", "tools"), repo.state_dir / "tools")
-    remove_obsolete_runtime_files(repo)
+    materialize_rules(repo)
+    materialize_team(repo)
+    sync_runtime_commands(repo)
+    sync_runtime_roles(repo)
 
-    rules, _rules_source = effective_rules_text(repo)
-    write_text_atomic(repo.state_dir / "AGENTS.md", rules)
 
-    roles_dir = repo.state_dir / "roles"
-    roles_dir.mkdir(parents=True, exist_ok=True)
-    for name in sorted(set(packaged_role_names()) | set(local_role_names(repo))):
-        text, _source = effective_role_text(repo, name)
-        write_text_atomic(roles_dir / f"{name}.md", text)
+def update_runtime(repo: Repo, refresh_roles: bool = False) -> None:
+    ensure_state(repo)
+    write_text_atomic(repo.config_dir / "AGENTS.md", read_package_text("templates", "AGENTS.md"))
+    sync_runtime_commands(repo)
+    if refresh_roles:
+        refresh_all_roles(repo)
 
 
 def pid_is_running(pid: int | None) -> bool:
@@ -279,8 +394,8 @@ def user_path(value: str) -> Path:
 
 def run_runtime_tool(repo: Repo, tool: str, args: list[str]) -> int:
     sync_runtime(repo)
-    command = [str(repo.state_dir / "bin" / tool), *args]
-    proc = subprocess.run(command, cwd=repo.state_dir, check=False)
+    command = [str(repo.config_dir / "bin" / tool), *args]
+    proc = subprocess.run(command, cwd=repo.config_dir, check=False)
     return proc.returncode
 
 
@@ -356,6 +471,13 @@ def materialize_role(repo: Repo, name: str) -> Path:
 def materialize_all_roles(repo: Repo) -> None:
     for name in packaged_role_names():
         materialize_role(repo, name)
+
+
+def refresh_all_roles(repo: Repo) -> None:
+    for name in packaged_role_names():
+        text = packaged_role_text(name)
+        if text is not None:
+            write_text_atomic(local_role_path(repo, name), text)
 
 
 def effective_rules_text(repo: Repo) -> tuple[str, str]:
@@ -550,16 +672,9 @@ def agent_records(repo: Repo) -> list[dict[str, Any]]:
 def status_data(repo: Repo) -> dict[str, Any]:
     tasks = task_records(repo) if (repo.state_dir / "tasks").is_dir() else []
     jobs = job_records(repo) if (repo.state_dir / "jobs").is_dir() else []
+    agents = agent_records(repo) if (repo.state_dir / "agents").is_dir() else []
+    running_agents = sum(1 for agent in agents if agent.get("running"))
     supervisor_pid = read_pid(repo.state_dir / "runs" / "supervisor.pid")
-    server_path = repo.state_dir / "runs" / "server.json"
-    server: dict[str, Any] = {}
-    try:
-        server = json.loads(server_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        server = {}
-    server_pid = int(server.get("pid") or 0)
-    if not pid_is_running(server_pid):
-        server = {}
     return {
         "repo_root": str(repo.root),
         "git_dir": str(repo.git_dir),
@@ -568,7 +683,7 @@ def status_data(repo: Repo) -> dict[str, Any]:
         "initialized": repo.state_dir.is_dir(),
         "supervisor_pid": supervisor_pid,
         "supervisor_running": pid_is_running(supervisor_pid),
-        "server_url": server.get("url", ""),
+        "running_agent_count": running_agents,
         "task_count": len(tasks),
         "job_count": len(jobs),
         "failed_job_count": sum(1 for job in jobs if job.get("status") == "failed"),
@@ -579,24 +694,40 @@ def cmd_init(args: argparse.Namespace) -> int:
     repo = discover_repo()
     sync_runtime(repo)
     if args.tracked_config:
-        materialize_rules(repo)
-        materialize_all_roles(repo)
-        materialize_team(repo)
         (repo.config_dir / "specs").mkdir(parents=True, exist_ok=True)
     print(f"Initialized git agents state: {repo.state_dir}")
+    print(f"Installed generic agent protocol: {repo.config_dir / 'AGENTS.md'}")
     if args.tracked_config:
-        print(f"Materialized tracked config: {repo.config_dir}")
+        print(f"Created optional specs directory: {repo.config_dir / 'specs'}")
+    return 0
+
+
+def cmd_update(args: argparse.Namespace) -> int:
+    repo = discover_repo()
+    update_runtime(repo, refresh_roles=args.roles)
+    print(f"Updated GitAgents command helpers: {repo.config_dir}")
+    print(f"Updated generic agent protocol: {repo.config_dir / 'AGENTS.md'}")
+    if args.roles:
+        print(f"Updated default role templates: {repo.config_dir / 'roles'}")
     return 0
 
 
 def cmd_status(_args: argparse.Namespace) -> int:
     repo = discover_repo()
     data = status_data(repo)
+    if data["supervisor_running"]:
+        supervisor = "running"
+    elif data["running_agent_count"]:
+        supervisor = f"stopped (managed processes running: {data['running_agent_count']})"
+    elif data["supervisor_pid"]:
+        supervisor = "stopped (stale pid file)"
+    else:
+        supervisor = "stopped"
     rows = [
         ["initialized", data["initialized"]],
-        ["supervisor", "running" if data["supervisor_running"] else "stopped"],
+        ["supervisor", supervisor],
         ["supervisor_pid", data["supervisor_pid"] or ""],
-        ["web", data["server_url"]],
+        ["managed_processes", data["running_agent_count"]],
         ["tasks", data["task_count"]],
         ["jobs", data["job_count"]],
         ["failed_jobs", data["failed_job_count"]],
@@ -708,32 +839,6 @@ def cmd_rules_show(_args: argparse.Namespace) -> int:
     repo = discover_repo()
     text, _source = effective_rules_text(repo)
     print(text, end="" if text.endswith("\n") else "\n")
-    return 0
-
-
-def cmd_rules_edit(_args: argparse.Namespace) -> int:
-    repo = discover_repo()
-    path = materialize_rules(repo)
-    editor = os.environ.get("EDITOR")
-    if not editor:
-        print(path)
-        print("Set EDITOR to open this file automatically.", file=sys.stderr)
-        return 0
-    proc = subprocess.run([*shlex.split(editor), str(path)], check=False)
-    return proc.returncode
-
-
-def cmd_rules_reset(args: argparse.Namespace) -> int:
-    repo = discover_repo()
-    path = repo.config_dir / "AGENTS.md"
-    if path.exists() and not args.yes:
-        if not sys.stdin.isatty():
-            raise UserError("refusing to overwrite rules without --yes")
-        answer = input(f"Reset {path}? [y/N] ").strip().lower()
-        if answer not in {"y", "yes"}:
-            return 1
-    write_text_atomic(path, read_package_text("templates", "AGENTS.md"))
-    print(path)
     return 0
 
 
@@ -1115,6 +1220,7 @@ def stop_supervisor(repo: Repo, quiet: bool = False) -> int:
             pid_file.unlink()
         except OSError:
             pass
+        remove_registry_instance(repo)
         if not quiet:
             print("git agents supervisor is not running")
         return 0
@@ -1137,6 +1243,7 @@ def stop_supervisor(repo: Repo, quiet: bool = False) -> int:
         pid_file.unlink()
     except OSError:
         pass
+    remove_registry_instance(repo)
     if not quiet:
         print(f"stopped git agents supervisor pid={pid}")
     return 0
@@ -1147,7 +1254,10 @@ def start_supervisor(
     no_console: bool,
     restart: bool = False,
     console_model: str | None = None,
+    no_heartbeat: bool = False,
+    heartbeat: int = DEFAULT_HEARTBEAT_MINUTES,
 ) -> int:
+    heartbeat = effective_heartbeat(no_console, no_heartbeat, heartbeat)
     validate_required_engines(repo, no_console)
     sync_runtime(repo)
     pid_file = repo.state_dir / "runs" / "supervisor.pid"
@@ -1171,6 +1281,8 @@ def start_supervisor(
         command.append("--no-console")
     elif console_model:
         command.extend(["--console-model", console_model])
+    if heartbeat:
+        command.extend(["--heartbeat", str(heartbeat)])
     with log_path.open("ab") as log:
         proc = subprocess.Popen(
             command,
@@ -1183,6 +1295,7 @@ def start_supervisor(
     if proc.poll() is not None:
         raise UserError(f"supervisor exited early; see {log_path}")
     write_text_atomic(pid_file, f"{proc.pid}\n")
+    write_registry_instance(repo)
     print(f"started git agents supervisor pid={proc.pid}")
     return 0
 
@@ -1194,6 +1307,8 @@ def cmd_start(args: argparse.Namespace) -> int:
         no_console=args.no_console,
         restart=args.restart,
         console_model=args.console_model,
+        no_heartbeat=args.no_heartbeat,
+        heartbeat=args.heartbeat,
     )
 
 
@@ -1211,20 +1326,22 @@ def cmd_restart(args: argparse.Namespace) -> int:
         no_console=args.no_console,
         restart=False,
         console_model=args.console_model,
+        no_heartbeat=args.no_heartbeat,
+        heartbeat=args.heartbeat,
     )
 
 
-def team_agent_command(state_dir: Path, agent: dict[str, str]) -> list[str]:
+def team_agent_command(git_agents_dir: Path, agent: dict[str, str]) -> list[str]:
     engine = agent["engine"]
     if engine == "pi-interactive":
         command = [
-            str(state_dir / "tools" / "agent-pi-interactive"),
+            str(git_agents_dir / "tools" / "agent-pi-interactive"),
             "--pi",
             "--headless",
         ]
     elif engine == "pi":
         command = [
-            str(state_dir / "tools" / "agent"),
+            str(git_agents_dir / "tools" / "agent"),
             "--pi",
             "--headless",
         ]
@@ -1253,6 +1370,7 @@ def cmd_supervisor(args: argparse.Namespace) -> int:
     root = Path(args.repo_root).resolve()
     state_dir = Path(args.state_dir).resolve()
     repo = discover_repo(root)
+    git_agents_dir = repo.config_dir
     for name in STATE_SUBDIRS:
         (state_dir / name).mkdir(parents=True, exist_ok=True)
     team, team_source = effective_team(repo)
@@ -1267,7 +1385,9 @@ def cmd_supervisor(args: argparse.Namespace) -> int:
                 "started_at": timestamp(),
                 "no_console": bool(args.no_console),
                 "console_model": args.console_model or "",
-                "runtime_root": str(state_dir),
+                "heartbeat": int(args.heartbeat),
+                "git_agents_root": str(git_agents_dir),
+                "state_root": str(state_dir),
                 "team_source": team_source,
             },
             indent=2,
@@ -1289,11 +1409,12 @@ def cmd_supervisor(args: argparse.Namespace) -> int:
         log = log_path.open("ab")
         env = os.environ.copy()
         env["GIT_AGENTS_REPO_ROOT"] = str(root)
+        env["GIT_AGENTS_ROOT"] = str(git_agents_dir)
         env["GIT_AGENTS_STATE_DIR"] = str(state_dir)
         try:
             proc = subprocess.Popen(
                 command,
-                cwd=state_dir,
+                cwd=git_agents_dir,
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
@@ -1334,7 +1455,7 @@ def cmd_supervisor(args: argparse.Namespace) -> int:
     try:
         if not args.no_console:
             console_command = [
-                str(state_dir / "tools" / "agent-pi-interactive"),
+                str(git_agents_dir / "tools" / "agent-pi-interactive"),
                 "--pi",
                 "--console",
                 "--headless",
@@ -1342,6 +1463,21 @@ def cmd_supervisor(args: argparse.Namespace) -> int:
             if args.console_model:
                 console_command.extend(["--model", args.console_model])
             children.append(start_managed("console", console_command))
+            notifier_command = [
+                str(git_agents_dir / "tools" / "console-notifier"),
+                "--state-dir",
+                str(state_dir),
+            ]
+            children.append(start_managed("console-notifier", notifier_command))
+            if args.heartbeat > 0:
+                heartbeat_command = [
+                    str(git_agents_dir / "tools" / "heartbeat"),
+                    "--state-dir",
+                    str(state_dir),
+                    "--minutes",
+                    str(args.heartbeat),
+                ]
+                children.append(start_managed("heartbeat", heartbeat_command))
         else:
             print(f"{timestamp()} console disabled", flush=True)
 
@@ -1351,7 +1487,7 @@ def cmd_supervisor(args: argparse.Namespace) -> int:
             children.append(
                 start_managed(
                     f"agent-{agent['name']}",
-                    team_agent_command(state_dir, agent),
+                    team_agent_command(git_agents_dir, agent),
                     agent_name=agent["name"],
                 )
             )
@@ -1380,6 +1516,7 @@ def cmd_supervisor(args: argparse.Namespace) -> int:
             (state_dir / "runs" / "supervisor.pid").unlink()
         except OSError:
             pass
+        remove_registry_instance(repo)
     return 0
 
 
@@ -1470,72 +1607,6 @@ def cmd_prompt(args: argparse.Namespace) -> int:
     return 0
 
 
-def json_response(handler: BaseHTTPRequestHandler, status: int, payload: Any) -> None:
-    body = json.dumps(payload).encode("utf-8")
-    handler.send_response(status)
-    handler.send_header("Content-Type", "application/json; charset=utf-8")
-    handler.send_header("Content-Length", str(len(body)))
-    handler.send_header("Cache-Control", "no-store")
-    handler.end_headers()
-    handler.wfile.write(body)
-
-
-def static_response(handler: BaseHTTPRequestHandler, name: str) -> None:
-    path = package_path("web", name)
-    if not path.is_file():
-        handler.send_error(404)
-        return
-    body = path.read_bytes()
-    handler.send_response(200)
-    handler.send_header("Content-Type", mimetypes.guess_type(name)[0] or "application/octet-stream")
-    handler.send_header("Content-Length", str(len(body)))
-    handler.send_header("Cache-Control", "no-store")
-    handler.end_headers()
-    handler.wfile.write(body)
-
-
-def bind_server(host: str, port: int, handler_type):
-    attempts = 1 if port == 0 else 100
-    last_error: OSError | None = None
-    for offset in range(attempts):
-        candidate = port + offset if port else 0
-        try:
-            return ThreadingHTTPServer((host, candidate), handler_type)
-        except OSError as exc:
-            last_error = exc
-            if exc.errno == errno.EADDRINUSE and offset + 1 < attempts:
-                continue
-            break
-    raise UserError(f"cannot bind {host}:{port}: {last_error}")
-
-
-def server_url(server: ThreadingHTTPServer, host: str) -> str:
-    public_host = host
-    if public_host in {"", "0.0.0.0", "::"}:
-        public_host = "127.0.0.1"
-    if ":" in public_host and not public_host.startswith("["):
-        public_host = f"[{public_host}]"
-    return f"http://{public_host}:{server.server_address[1]}"
-
-
-def cmd_serve(args: argparse.Namespace) -> int:
-    repo = discover_repo()
-    sync_runtime(repo)
-    command = [
-        str(repo.state_dir / "tools" / "git-agents-ui"),
-        "--root",
-        str(repo.state_dir),
-        "--host",
-        args.host,
-        "--port",
-        str(args.port),
-        "--no-team",
-        "--no-console",
-    ]
-    proc = subprocess.run(command, cwd=repo.state_dir, check=False)
-    return proc.returncode
-
-
 def cmd_spec_build(_args: argparse.Namespace) -> int:
     raise UserError("spec build is not implemented yet", 2)
 
@@ -1564,13 +1635,9 @@ def add_role_parser(subparsers: argparse._SubParsersAction) -> None:
 
 
 def add_rules_parser(subparsers: argparse._SubParsersAction) -> None:
-    rules = subparsers.add_parser("rules", help="manage generic agent rules")
+    rules = subparsers.add_parser("rules", help="inspect the generic GitAgents protocol")
     rules_sub = rules.add_subparsers(dest="rules_command", required=True)
-    rules_sub.add_parser("show", help="show effective generic rules").set_defaults(func=cmd_rules_show)
-    rules_sub.add_parser("edit", help="edit local generic rules").set_defaults(func=cmd_rules_edit)
-    reset = rules_sub.add_parser("reset", help="reset generic rules from the package template")
-    reset.add_argument("--yes", action="store_true")
-    reset.set_defaults(func=cmd_rules_reset)
+    rules_sub.add_parser("show", help="show the installed generic protocol").set_defaults(func=cmd_rules_show)
 
 
 def add_team_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -1675,26 +1742,41 @@ def build_parser(include_internal: bool = False) -> argparse.ArgumentParser:
 
     for name in ("init", "install"):
         init = subparsers.add_parser(name, help="initialize repository state")
-        init.add_argument("--tracked-config", action="store_true", help="materialize .git-agents config files")
+        init.add_argument("--tracked-config", action="store_true", help="also create optional .git-agents/specs")
         init.set_defaults(func=cmd_init)
+
+    update = subparsers.add_parser("update", help="refresh runtime commands and generic agent protocol")
+    update.add_argument("--roles", action="store_true", help="also refresh default role templates")
+    update.set_defaults(func=cmd_update)
 
     start = subparsers.add_parser("start", help="start the agent supervisor")
     start.add_argument("--restart", action="store_true")
     start.add_argument("--no-console", action="store_true")
+    start.add_argument("--no-heartbeat", action="store_true")
+    start.add_argument(
+        "--heartbeat",
+        type=int,
+        default=DEFAULT_HEARTBEAT_MINUTES,
+        metavar="MINUTES",
+        help=f"minutes between console heartbeat prompts; default: {DEFAULT_HEARTBEAT_MINUTES}",
+    )
     start.add_argument("--console-model")
     start.set_defaults(func=cmd_start)
 
     subparsers.add_parser("stop", help="stop the agent supervisor").set_defaults(func=cmd_stop)
     restart = subparsers.add_parser("restart", help="restart the agent supervisor")
     restart.add_argument("--no-console", action="store_true")
+    restart.add_argument("--no-heartbeat", action="store_true")
+    restart.add_argument(
+        "--heartbeat",
+        type=int,
+        default=DEFAULT_HEARTBEAT_MINUTES,
+        metavar="MINUTES",
+        help=f"minutes between console heartbeat prompts; default: {DEFAULT_HEARTBEAT_MINUTES}",
+    )
     restart.add_argument("--console-model")
     restart.set_defaults(func=cmd_restart)
     subparsers.add_parser("status", help="show repository agent status").set_defaults(func=cmd_status)
-
-    serve = subparsers.add_parser("serve", help="serve the web UI in the foreground")
-    serve.add_argument("--host", default=os.environ.get("HOST", DEFAULT_HOST))
-    serve.add_argument("--port", type=int, default=int(os.environ.get("PORT", DEFAULT_PORT)))
-    serve.set_defaults(func=cmd_serve)
 
     log = subparsers.add_parser("log", help="show an agent transcript")
     log.add_argument("-f", "--follow", action="store_true")
@@ -1720,6 +1802,7 @@ def build_parser(include_internal: bool = False) -> argparse.ArgumentParser:
         supervisor.add_argument("--state-dir", required=True)
         supervisor.add_argument("--no-console", action="store_true")
         supervisor.add_argument("--console-model")
+        supervisor.add_argument("--heartbeat", type=int, default=0)
         supervisor.set_defaults(func=cmd_supervisor)
 
     return parser

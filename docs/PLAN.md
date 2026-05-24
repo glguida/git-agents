@@ -9,7 +9,7 @@ inside any Git repository:
 git agents install
 git agents start
 git agents stop
-git agents serve
+gitagents-dashboard
 git agents log -f
 git agents prompt "what should I do next?"
 ```
@@ -53,13 +53,24 @@ git rev-parse --show-prefix
 git rev-parse --absolute-git-dir
 ```
 
-Runtime state lives in the worktree under `.git-agents/state/` so local agent
-CLIs can access GitAgents state without writing tracked project files. The
-state directory is added to `.gitignore` during init/install.
+GitAgents installs a stationary repository-local system under `.git-agents/`.
+Only `.git-agents/state/` is local execution state and ignored.
 
-## State Layout
+## Repository Layout
 
-Runtime state should live under the repo-local GitAgents directory:
+The stationary side can be committed:
+
+```text
+.git-agents/
+  AGENTS.md
+  bin/
+  tools/
+  roles/
+  team.toml
+  specs/
+```
+
+Runtime state should live under the ignored state directory:
 
 ```text
 .git-agents/state/
@@ -69,17 +80,6 @@ Runtime state should live under the repo-local GitAgents directory:
   runs/
   logs/
   config.json
-```
-
-Tracked project configuration, when explicitly requested, should be small and
-human-editable:
-
-```text
-.git-agents/
-  state/      # ignored runtime state
-  roles/
-  team.toml
-  specs/
 ```
 
 Default init/install may create or update `.gitignore` so `.git-agents/state/`
@@ -96,11 +96,9 @@ git agents start
 git agents stop
 git agents restart
 git agents status
-git agents serve
 git agents log [-f] [agent]
 git agents prompt [--quiet] [message]
 git agents rules show
-git agents rules edit
 git agents role list
 git agents role add <name> [--from <template>]
 git agents role edit <name>
@@ -137,12 +135,13 @@ Notes:
 - `prompt` should accept both command-line arguments and stdin.
 - `prompt` should print the console transcript for that turn by default; use
   `--quiet` to send only and leave the response in the log.
-- `rules` commands manage the generic agent protocol copied from package
-  templates when customization is requested.
+- `rules` commands inspect the GitAgents-owned generic agent protocol installed
+  by `init` and refreshed by `update`.
 - `role` commands manage repo-local role definitions copied from package
   templates when customization is requested.
 - `team` commands manage the repo-local set of named agents.
-- `serve` starts only the local web UI and runs in the foreground.
+- `gitagents-dashboard` starts the global web UI in the foreground. It is a
+  separate utility, not a `git agents` subcommand.
 - `spec build` is the first planned higher-level workflow command for spec
   builder integration.
 
@@ -168,15 +167,16 @@ After a role is materialized, agents should read the repo-local role file for
 that role. Package updates may add or improve templates, but should not
 overwrite modified repo-local roles without an explicit command.
 
-Generic agent rules live in the package by default and can be materialized as:
+The generic GitAgents protocol is installed into the repository as:
 
 ```text
 .git-agents/
   AGENTS.md
 ```
 
-The rules file defines behavior shared by all roles. Role files define only
-role-specific responsibilities.
+The protocol file defines system behavior shared by all roles. It is
+GitAgents-owned, not repository policy. Repository rules belong in normal
+project documentation and repo-local roles.
 
 Possible role commands:
 
@@ -258,9 +258,26 @@ Initialize repo-local runtime state:
 
 - create the runtime state directory under `.git-agents/state`
 - add `/.git-agents/state/` to `.gitignore`
+- copy the generic agent protocol to `.git-agents/AGENTS.md` if absent
+- copy runtime command helpers to `.git-agents/bin` and `.git-agents/tools`
+- copy packaged roles to `.git-agents/roles` if absent
+- copy default team config to `.git-agents/team.toml` if absent
 - write default runtime config if absent
-- optionally materialize `.git-agents/` when the user passes a tracked-config option
+- optionally create the specs directory when the user passes a tracked-config
+  option
 - validate required agent executables
+
+### `git agents update`
+
+Refresh package-managed runtime pieces that must match each other:
+
+- runtime queue/helper commands under `.git-agents/bin`
+- runtime launcher/UI helpers under `.git-agents/tools`
+- the generic agent protocol at `.git-agents/AGENTS.md`
+
+Do not refresh repo-local roles by default. Roles are default templates and may
+contain repository policy. `git agents update --roles` explicitly refreshes the
+packaged role templates under `.git-agents/roles/`.
 
 ### `git agents start`
 
@@ -269,6 +286,10 @@ Start the configured team:
 - launch the supervisor as the owner of agent processes
 - write pid/status files under runtime state
 - start or connect to the console agent by default
+- start a console job forwarder when the console is enabled
+- start a console heartbeat by default; the heartbeat sends
+  `heartbeat <time> <date>` immediately and then every 15 minutes
+- support `--heartbeat <minutes>` and `--no-heartbeat`
 - support `--no-console` for batch/headless use
 - return nonzero if agents are already running unless `--restart` is supplied
 
@@ -300,31 +321,30 @@ Show a compact overview:
 - active agents
 - current jobs
 - failed jobs
-- web server URL if `serve` is running
+- per-repository supervisor status
 
 ### `git agents tasks create <task> <spec-file>`
 
-Create a task and its initial planner job using the package-managed runtime
-queue tools under `.git-agents/state`.
+Create a task and its initial planner job using the package-managed queue tools
+under `.git-agents/bin`.
 
-Humans should prefer this porcelain command over invoking runtime tools under
-`.git-agents/state/bin` directly.
+Humans should prefer this porcelain command over invoking tools under
+`.git-agents/bin` directly.
 
-### `git agents serve`
+### `gitagents-dashboard`
 
-Start the web UI in the foreground:
+Start the global web UI in the foreground:
 
+- read linked running repositories from `~/.gitagents/instances/`
+- treat each entry as a link to a real `.git-agents` directory
 - serve bundled package assets
-- read runtime state from `.git-agents/state`
+- switch between linked GitAgents state roots
 - never start, stop, or supervise agent processes
 - exit when interrupted
 
 There should not be a `--with-agents`, `--with-team`, or equivalent flag. Agent
-process supervision belongs to `git agents start`.
-
-The viewer/server can also become a separate Git extension later. The core
-extension should keep the queue, supervisor, and filesystem state model usable
-without requiring the UI.
+process supervision belongs to `git agents start`. The dashboard is visibility
+over linked running systems, not the owner of those systems.
 
 ### Recovery commands
 

@@ -119,6 +119,13 @@ def run_bin(root: Path, *args: str, capture: bool = True) -> subprocess.Complete
     return proc
 
 
+def state_dir(root: Path) -> Path:
+    env_state = os.environ.get("GIT_AGENTS_STATE_DIR", "").strip()
+    if env_state:
+        return Path(env_state).expanduser().resolve()
+    return root / "state"
+
+
 class Transcript:
     def __init__(self, paths: Iterable[Path], mirror_stdout: bool = False, mirror_prefix: str = "") -> None:
         self.files = [path.open("a", encoding="utf-8", buffering=1) for path in paths]
@@ -349,10 +356,16 @@ def read_repo_root(root: Path) -> Path | None:
     if env_root:
         return Path(env_root).expanduser().resolve()
     try:
-        text = (root / "repo-root").read_text(encoding="utf-8").strip()
+        text = (state_dir(root) / "repo-root").read_text(encoding="utf-8").strip()
     except OSError:
         return None
     return Path(text).expanduser().resolve() if text else None
+
+
+def protocol_path(root: Path, repo_root: Path | None) -> Path:
+    if repo_root is not None:
+        return repo_root / ".git-agents" / "AGENTS.md"
+    return root / "AGENTS.md"
 
 
 def build_command(
@@ -377,6 +390,7 @@ def main() -> int:
 
     script_dir = Path(__file__).resolve().parent
     root = script_dir.parent
+    state_root = state_dir(root)
     repo_root = read_repo_root(root)
 
     if shutil.which(args.engine) is None:
@@ -409,21 +423,23 @@ def main() -> int:
 
     write_file(agent_dir / "current-job", job_id)
 
-    job_dir = root / "jobs" / job_id
+    job_dir = state_root / "jobs" / job_id
     write_runtime_pids(agent_dir, job_dir)
+    rules_path = protocol_path(root, repo_root)
     prompt = "\n".join(
         part
         for part in (
             f"You are agent {args.agent_name}.",
-            f"Your GitAgents runtime root is: {root}",
+            f"Your GitAgents root is: {root}",
+            f"Your GitAgents state directory is: {state_root}",
             f"Your target repository root is: {repo_root}" if repo_root else "",
             (
-                f"Read {root / 'AGENTS.md'} before working. It is the effective "
-                "generic GitAgents protocol, copied from repo-local GitAgents "
-                "config when present and from packaged defaults otherwise. "
-                f"Use the runtime bin tools under {root / 'bin'}."
+                f"Read {rules_path} before working. It is the GitAgents-owned "
+                "generic protocol installed by `git agents init` and refreshed "
+                "with `git agents update`. "
+                f"Use the GitAgents command helpers under {root / 'bin'}."
             ),
-            "Treat paths such as agents/, jobs/, tasks/, roles/, and bin/ in GitAgents instructions as relative to the runtime root.",
+            "Treat bin/ and roles/ as relative to the GitAgents root. Treat tasks/, jobs/, agents/, runs/, and logs/ as relative to the GitAgents state directory.",
         )
         if part
     )

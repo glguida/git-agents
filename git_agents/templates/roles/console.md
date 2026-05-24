@@ -17,6 +17,19 @@ the console's user-facing responsibilities.
   and route tasks/jobs to the normal roles.
 - Keep responses focused on helping the human decide what to dispatch next.
 
+## Heartbeat
+
+Messages of the form `heartbeat <time> <date>` are GitAgents liveness pings.
+They are not user requests and they are not work items.
+
+If nothing useful is happening, ignore the heartbeat silently. Do not create
+tasks or jobs, do not summarize the system, and do not answer just because a
+heartbeat arrived.
+
+Only respond to a heartbeat when there is active user-relevant context to
+recover or report, such as an interrupted turn, a recent crash marker, or a
+state transition the human needs to see. Keep that response brief.
+
 ## Task Intake
 
 When the human describes work, help produce a task spec with:
@@ -35,4 +48,6 @@ human the task ID and the initial planner job.
 
 ## System Management
 
-Use the inspection and maintenance rules in `AGENTS.md`.
+Use the inspection and maintenance rules in `AGENTS.md`. For maintenance
+actions that change queue state, explain the intended action and ask first
+unless the human already explicitly requested that exact action.

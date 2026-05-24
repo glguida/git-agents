@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "git-agents"
-version = "0.1.0"
+version = "0.2.0"
 description = "Git-native coding agent workflow extension"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,6 +27,7 @@ dependencies = []
 
 [project.scripts]
 git-agents = "git_agents.cli:main"
+gitagents-dashboard = "git_agents.dashboard:main"
 
 [project.urls]
 Homepage = "https://github.com/glguida/git-agents"
@@ -40,9 +41,7 @@ git_agents = [
   "templates/AGENTS.md",
   "templates/roles/*.md",
   "templates/team.toml",
-  "runtime/AGENTS.md",
   "runtime/bin/*",
-  "runtime/roles/*.md",
   "runtime/tools/*",
   "runtime/tools/git-agents-public/*",
 ]

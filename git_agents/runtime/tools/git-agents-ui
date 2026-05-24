@@ -20,7 +20,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 
-DEFAULT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_GIT_AGENTS_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_ROOT = DEFAULT_GIT_AGENTS_ROOT / "state"
+DEFAULT_REGISTRY_DIR = Path("~/.gitagents")
 PUBLIC_DIR = Path(__file__).resolve().parent / "git-agents-public"
 DEFAULT_PORT = 4137
 PROCESS_CHECK_INTERVAL = 1.0
@@ -55,6 +57,8 @@ class Config:
     root: Path
     host: str
     port: int
+    registry: bool = False
+    registry_dir: Path = DEFAULT_REGISTRY_DIR.expanduser()
 
 
 class GitAgentsServer(ThreadingHTTPServer):
@@ -134,6 +138,103 @@ def list_dirs(path: Path, include_hidden=False):
         )
     except OSError:
         return []
+
+
+def pid_is_running(pid):
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def read_pid(path: Path):
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+        if not text:
+            return None
+        return int(text)
+    except (OSError, ValueError):
+        return None
+
+
+def registry_entries(config: Config):
+    if not config.registry:
+        return [
+            {
+                "id": "local",
+                "repoRoot": "",
+                "gitAgentsRoot": str(config.root.parent if config.root.name == "state" else config.root),
+                "stateRoot": str(config.root),
+                "supervisorPid": None,
+                "running": True,
+                "valid": True,
+                "title": config.root.parent.name if config.root.name == "state" else config.root.name,
+                "updatedAt": None,
+            }
+        ]
+
+    instances_dir = config.registry_dir / "instances"
+    entries = []
+    try:
+        paths = sorted(instances_dir.iterdir(), key=lambda item: item.name)
+    except OSError:
+        paths = []
+
+    for path in paths:
+        if path.name.endswith(".json"):
+            continue
+        try:
+            git_agents_root = path.resolve(strict=True)
+        except OSError:
+            git_agents_root = path.resolve(strict=False)
+        state_root = git_agents_root / "state"
+        repo_root_text = read_text(state_root / "repo-root", max_bytes=4096).strip()
+        repo_root = Path(repo_root_text).expanduser() if repo_root_text else git_agents_root.parent
+        supervisor_pid = read_pid(state_root / "runs" / "supervisor.pid")
+        valid = state_root.is_dir() and (state_root / "jobs").is_dir() and (state_root / "agents").is_dir()
+        running = pid_is_running(supervisor_pid)
+        updated_at = (
+            iso_from_stat(state_root / "runs" / "supervisor-heartbeat")
+            or iso_from_stat(state_root / "runs" / "supervisor.pid")
+            or iso_from_stat(path)
+        )
+        entries.append(
+            {
+                "id": path.name,
+                "repoRoot": str(repo_root) if str(repo_root) else "",
+                "gitAgentsRoot": str(git_agents_root),
+                "stateRoot": str(state_root) if str(state_root) else "",
+                "supervisorPid": supervisor_pid,
+                "running": running,
+                "valid": valid,
+                "title": repo_root.name if str(repo_root) else path.name,
+                "updatedAt": updated_at,
+            }
+        )
+    return entries
+
+
+def default_registry_root(config: Config):
+    entries = registry_entries(config)
+    for entry in entries:
+        if entry["running"] and entry["valid"]:
+            return entry["stateRoot"]
+    for entry in entries:
+        if entry["valid"]:
+            return entry["stateRoot"]
+    return str(config.root)
+
+
+def requested_root(config: Config, query):
+    root_value = query.get("root", [""])[0]
+    if not root_value and config.registry:
+        root_value = default_registry_root(config)
+    if not root_value:
+        root_value = str(config.root)
+    return Path(root_value).expanduser()
 
 
 def first_markdown_title(markdown, fallback):
@@ -555,10 +656,20 @@ class ViewerHandler(BaseHTTPRequestHandler):
 
     def handle_api(self, parsed):
         query = parse_qs(parsed.query)
-        root_value = query.get("root", [str(self.config.root)])[0] or str(self.config.root)
-        root = Path(root_value).expanduser()
+        root = requested_root(self.config, query)
         try:
-            if parsed.path == "/api/snapshot":
+            if parsed.path == "/api/instances":
+                instances = registry_entries(self.config)
+                self.send_json(
+                    200,
+                    {
+                        "registry": self.config.registry,
+                        "registryRoot": str(self.config.registry_dir),
+                        "defaultRoot": default_registry_root(self.config),
+                        "instances": instances,
+                    },
+                )
+            elif parsed.path == "/api/snapshot":
                 self.send_json(200, build_snapshot(root))
             elif parsed.path == "/api/file":
                 self.handle_file(root, query)
@@ -569,8 +680,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
 
     def handle_api_post(self, parsed):
         query = parse_qs(parsed.query)
-        root_value = query.get("root", [str(self.config.root)])[0] or str(self.config.root)
-        root = Path(root_value).expanduser()
+        root = requested_root(self.config, query)
         try:
             if parsed.path == "/api/agent-input":
                 self.handle_agent_input(root, query)
@@ -681,7 +791,8 @@ class ViewerHandler(BaseHTTPRequestHandler):
 
 
 def start_console(root: Path, model: str | None, verbose: bool):
-    console = root / "tools" / "agent-pi-interactive"
+    git_agents_root = root.parent if root.name == "state" else root
+    console = git_agents_root / "tools" / "agent-pi-interactive"
     if not console.is_file():
         raise ValueError(f"GitAgents console runner not found: {console}")
 
@@ -691,7 +802,10 @@ def start_console(root: Path, model: str | None, verbose: bool):
     if model:
         command.extend(["--model", model])
 
-    proc = subprocess.Popen(command, cwd=root, start_new_session=True)
+    env = os.environ.copy()
+    env["GIT_AGENTS_ROOT"] = str(git_agents_root)
+    env["GIT_AGENTS_STATE_DIR"] = str(root)
+    proc = subprocess.Popen(command, cwd=git_agents_root, start_new_session=True, env=env)
     time.sleep(0.2)
     rc = proc.poll()
     if rc is not None:
@@ -798,7 +912,7 @@ class ProcessSupervisor:
 
 def main():
     parser = argparse.ArgumentParser(description="GitAgents runner and local web interface")
-    parser.add_argument("--root", default=os.environ.get("GIT_AGENTS_ROOT", str(DEFAULT_ROOT)), help="GitAgents root directory")
+    parser.add_argument("--root", default=os.environ.get("GIT_AGENTS_STATE_DIR", str(DEFAULT_ROOT)), help="GitAgents state directory")
     parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"), help="Bind host (default: 127.0.0.1)")
     default_port = int(os.environ["PORT"]) if "PORT" in os.environ else DEFAULT_PORT
     parser.add_argument(
@@ -811,10 +925,22 @@ def main():
     parser.add_argument("--no-console", action="store_true", help="do not start the built-in console agent")
     parser.add_argument("--console-model", help="model to pass to the built-in console agent")
     parser.add_argument("--verbose", action="store_true", help="print console transcript output in this terminal")
+    parser.add_argument("--registry", action="store_true", help="show all GitAgents instances from the user instances directory")
+    parser.add_argument(
+        "--registry-dir",
+        default=os.environ.get("GIT_AGENTS_REGISTRY_DIR", str(DEFAULT_REGISTRY_DIR)),
+        help="GitAgents user instances directory",
+    )
     parser.add_argument("team_file", nargs="?", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
-    config = Config(root=Path(args.root).expanduser().resolve(), host=args.host, port=args.port)
+    config = Config(
+        root=Path(args.root).expanduser().resolve(),
+        host=args.host,
+        port=args.port,
+        registry=args.registry,
+        registry_dir=Path(args.registry_dir).expanduser().resolve(),
+    )
     ViewerHandler.config = config
 
     supervisors = []
@@ -833,7 +959,7 @@ def main():
                 "GitAgents web interface no longer starts team files; use 'git agents start'.",
                 file=sys.stderr,
             )
-        if not args.no_team and not args.no_console:
+        if not config.registry and not args.no_team and not args.no_console:
             console_supervisor = ProcessSupervisor(
                 "console",
                 lambda: start_console(config.root, args.console_model, args.verbose),
@@ -842,7 +968,10 @@ def main():
             supervisors.append(console_supervisor)
 
         print(f"GitAgents running at {server_url(server, config)}")
-        print(f"Reading GitAgents root: {config.root}")
+        if config.registry:
+            print(f"Reading GitAgents instances: {config.registry_dir / 'instances'}")
+        else:
+            print(f"Reading GitAgents root: {config.root}")
         server.serve_forever()
         return 0
     except KeyboardInterrupt:

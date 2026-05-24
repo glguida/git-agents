@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+"""Send periodic GitAgents heartbeat prompts to the console agent."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import signal
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
+
+from console_input import send_console_input
+
+
+DEFAULT_MINUTES = 15
+STOP = threading.Event()
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Send periodic GitAgents console heartbeat prompts.")
+    parser.add_argument(
+        "--state-dir",
+        default=os.environ.get("GIT_AGENTS_STATE_DIR", ".git-agents/state"),
+        help="GitAgents state directory. Defaults to GIT_AGENTS_STATE_DIR or .git-agents/state.",
+    )
+    parser.add_argument(
+        "--minutes",
+        type=int,
+        default=DEFAULT_MINUTES,
+        help=f"minutes between heartbeats. Defaults to {DEFAULT_MINUTES}.",
+    )
+    parser.add_argument("--once", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    if args.minutes < 1:
+        parser.error("--minutes must be at least 1")
+    return args
+
+
+def heartbeat_message(now: datetime | None = None) -> str:
+    now = now or datetime.now(timezone.utc)
+    return f"heartbeat {now:%H:%M:%SZ} {now:%Y-%m-%d}"
+
+
+def request_stop(_signum: int, _frame) -> None:
+    STOP.set()
+
+
+def send_heartbeat(state_dir: Path, quiet: bool = False) -> bool:
+    message = heartbeat_message()
+    if not send_console_input(state_dir, message, quiet=quiet):
+        return False
+    print(message, flush=True)
+    return True
+
+
+def send_heartbeat_when_ready(state_dir: Path) -> bool:
+    while not STOP.is_set():
+        if send_heartbeat(state_dir, quiet=True):
+            return True
+        STOP.wait(1)
+    return False
+
+
+def main() -> int:
+    args = parse_args()
+    state_dir = Path(args.state_dir).resolve()
+    signal.signal(signal.SIGTERM, request_stop)
+    signal.signal(signal.SIGINT, request_stop)
+
+    if args.once:
+        return 0 if send_heartbeat(state_dir) else 1
+
+    interval_seconds = args.minutes * 60
+    send_heartbeat_when_ready(state_dir)
+    while not STOP.wait(interval_seconds):
+        send_heartbeat_when_ready(state_dir)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
